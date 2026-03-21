@@ -1,7 +1,7 @@
 import yt_dlp
 import os
 
-def download_audio(url, output_dir="downloads"):
+def download_audio(url, output_dir="downloads", progress_hook=None):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -14,6 +14,9 @@ def download_audio(url, output_dir="downloads"):
             'preferredquality': '256',
         }],
         'restrictfilenames': True,
+        'quiet': True,
+        'no_warnings': True,
+        'progress_hooks': [progress_hook] if progress_hook else [],
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
