@@ -1,4 +1,5 @@
 import os
+import sys
 import winreg
 from downloader import download_audio
 from audio_processor import normalize_audio, embed_metadata
@@ -6,60 +7,100 @@ from audio_processor import normalize_audio, embed_metadata
 REG_PATH = r"Software\VibeDL"
 
 def get_config():
+    """レジストリから設定を読み込む。なければデフォルトを返す"""
     config = {"target_lufs": -14.0, "output_folder": "downloads"}
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH) as key:
             config["target_lufs"] = float(winreg.QueryValueEx(key, "TargetLUFS")[0])
             config["output_folder"] = winreg.QueryValueEx(key, "OutputFolder")[0]
-    except: pass
+    except:
+        pass
     return config
 
 def save_config(config):
+    """設定をレジストリに保存する"""
     winreg.CreateKey(winreg.HKEY_CURRENT_USER, REG_PATH)
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_WRITE) as key:
         winreg.SetValueEx(key, "TargetLUFS", 0, winreg.REG_SZ, str(config["target_lufs"]))
         winreg.SetValueEx(key, "OutputFolder", 0, winreg.REG_SZ, config["output_folder"])
 
-def my_hook(d):
+def progress_hook(d):
+    """ダウンロード進捗を表示するコールバック"""
     if d['status'] == 'downloading':
         p = d.get('_percent_str', '0%')
-        print(f"\r[Downloading] {p} ", end='')
+        eta = d.get('_eta_str', '??:??')
+        print(f"\r[Downloading] {p} (残り時間: {eta}) ", end='')
     elif d['status'] == 'finished':
-        print("\n[Done] ダウンロード完了。")
+        print("\n[Done] ダウンロード完了。音量調整を開始します...")
 
 def main():
     config = get_config()
+    
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"========== VibeDL (Target: {config['target_lufs']} LUFS) ==========")
-        print("1: YouTubeダウンロード / 2: 設定変更 / 0: 終了")
         
-        choice = input("\n選択 > ")
+        print(f"========== VibeDL v1.0 ==========")
+        print(f" 現在の設定: {config['target_lufs']} LUFS / 保存先: {config['output_folder']}")
+        print("---------------------------------")
+        print(" 1: YouTubeからダウンロード")
+        print(" 2: 設定を変更する (音量・保存先)")
+        print(" 0: 終了")
+        print("---------------------------------")
+        
+        choice = input("選択してください > ").strip()
+        
         if choice == "1":
-            url = input("URLを入力: ").strip()
+            url = input("\nYouTube URLを入力: ").strip()
             if not url: continue
+            
             try:
-                data = download_audio(url, config['output_folder'], progress_hook=my_hook)
-                print("音量調整中...")
-                out_file = normalize_audio(data['path'], config['target_lufs'])
+                print("\n[1/3] 解析中...")
+                data = download_audio(url, config['output_folder'], progress_hook=progress_hook)
                 
-                if out_file:
-                    print("画像・曲名を埋め込み中...")
-                    embed_metadata(out_file, data['title'], data['uploader'], data['thumb'])
-                    os.remove(data['path'])
-                    final_name = data['path'].replace(".mp3", "_Vibe.mp3")
-                    if os.path.exists(final_name): os.remove(final_name)
-                    os.rename(out_file, final_name)
-                    print(f"✨ 完了: {os.path.basename(final_name)}")
-                input("\nEnterで戻る...")
+                print(f"[2/3] 音量を最適化中 ({config['target_lufs']} LUFS)...")
+                temp_out = normalize_audio(data['temp_raw'], config['target_lufs'])
+                
+                if temp_out:
+                    print("[3/3] メタデータを埋め込み中...")
+                    embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
+                    
+                    if os.path.exists(data['dest_path']):
+                        os.remove(data['dest_path'])
+                    os.rename(temp_out, data['dest_path'])
+                    
+                    if os.path.exists(data['temp_raw']):
+                        os.remove(data['temp_raw'])
+                    
+                    print(f"\n✨ 正常に完了しました！")
+                    print(f"保存先: {data['dest_path']}")
+                else:
+                    print("\n❌ 音量調整に失敗しました。FFmpegを確認してください。")
+                    
+                input("\nEnterでメニューに戻る...")
+
             except Exception as e:
-                print(f"❌ エラー: {e}")
-                input()
+                print(f"\n❌ エラーが発生しました: {e}")
+                input("\nEnterでメニューに戻る...")
+
         elif choice == "2":
-            config['output_folder'] = input(f"保存フォルダ ({config['output_folder']}): ") or config['output_folder']
-            config['target_lufs'] = float(input(f"目標LUFS ({config['target_lufs']}): ") or config['target_lufs'])
+            print("\n--- 設定変更 ---")
+            new_folder = input(f"保存フォルダを入力 (現在: {config['output_folder']}): ").strip()
+            if new_folder: config['output_folder'] = new_folder
+            
+            new_lufs = input(f"目標音量を入力 (現在: {config['target_lufs']} LUFS): ").strip()
+            if new_lufs:
+                try:
+                    config['target_lufs'] = float(new_lufs)
+                except:
+                    print("❌ 数値を入力してください。")
+            
             save_config(config)
-        elif choice == "0": break
+            print("✅ 設定を保存しました。")
+            input("\nEnterで戻る...")
+
+        elif choice == "0":
+            print("終了します。")
+            break
 
 if __name__ == "__main__":
     main()
