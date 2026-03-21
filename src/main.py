@@ -1,8 +1,7 @@
-import winreg
 import os
-import sys
+import winreg
 from downloader import download_audio
-from audio_processor import normalize_audio
+from audio_processor import normalize_audio, embed_metadata
 
 REG_PATH = r"Software\VibeDL"
 
@@ -12,7 +11,7 @@ def get_config():
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH) as key:
             config["target_lufs"] = float(winreg.QueryValueEx(key, "TargetLUFS")[0])
             config["output_folder"] = winreg.QueryValueEx(key, "OutputFolder")[0]
-    except FileNotFoundError: pass
+    except: pass
     return config
 
 def save_config(config):
@@ -24,36 +23,42 @@ def save_config(config):
 def my_hook(d):
     if d['status'] == 'downloading':
         p = d.get('_percent_str', '0%')
-        print(f"\r[Downloading] {p}  完成まであと {d.get('_eta_str', '??')} ", end='')
+        print(f"\r[Downloading] {p} ", end='')
     elif d['status'] == 'finished':
-        print("\n[Done] ダウンロード完了。音質調整に移行します...")
+        print("\n[Done] ダウンロード完了。")
 
 def main():
     config = get_config()
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
-        print(f"========== VibeDL (Setting: {config['target_lufs']} LUFS) ==========")
-        print("1: YouTubeダウンロード / 2: 保存先・音量設定 / 0: 終了")
+        print(f"========== VibeDL (Target: {config['target_lufs']} LUFS) ==========")
+        print("1: YouTubeダウンロード / 2: 設定変更 / 0: 終了")
         
         choice = input("\n選択 > ")
         if choice == "1":
             url = input("URLを入力: ").strip()
             if not url: continue
             try:
-                raw = download_audio(url, config['output_folder'], progress_hook=my_hook)
-                final = normalize_audio(raw, target_lufs=config['target_lufs'])
-                if final and os.path.exists(raw): os.remove(raw)
-                print(f"\n✨ 成功: {os.path.basename(final)}")
-                input("\nEnterでメニューに戻る...")
+                data = download_audio(url, config['output_folder'], progress_hook=my_hook)
+                print("音量調整中...")
+                out_file = normalize_audio(data['path'], config['target_lufs'])
+                
+                if out_file:
+                    print("画像・曲名を埋め込み中...")
+                    embed_metadata(out_file, data['title'], data['uploader'], data['thumb'])
+                    os.remove(data['path'])
+                    final_name = data['path'].replace(".mp3", "_Vibe.mp3")
+                    if os.path.exists(final_name): os.remove(final_name)
+                    os.rename(out_file, final_name)
+                    print(f"✨ 完了: {os.path.basename(final_name)}")
+                input("\nEnterで戻る...")
             except Exception as e:
-                print(f"\n❌ エラー: {e}")
+                print(f"❌ エラー: {e}")
                 input()
         elif choice == "2":
-            print(f"\n現在の保存先: {config['output_folder']}")
-            config['output_folder'] = input("新しいフォルダ名 (空欄で維持): ") or config['output_folder']
-            config['target_lufs'] = float(input("目標音量LUFS (-20 ～ -5): ") or config['target_lufs'])
+            config['output_folder'] = input(f"保存フォルダ ({config['output_folder']}): ") or config['output_folder']
+            config['target_lufs'] = float(input(f"目標LUFS ({config['target_lufs']}): ") or config['target_lufs'])
             save_config(config)
-            print("設定を保存しました。")
         elif choice == "0": break
 
 if __name__ == "__main__":
