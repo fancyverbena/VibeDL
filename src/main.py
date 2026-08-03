@@ -2,7 +2,10 @@ import os
 import sys
 import winreg
 from downloader import download_audio, download_playlist
-from audio_processor import normalize_audio, embed_metadata, get_ffmpeg_info
+from audio_processor import (
+    normalize_audio, embed_metadata,
+    get_ffmpeg_info, check_ffmpeg, download_ffmpeg
+)
 
 REG_PATH = r"Software\VibeDL"
 
@@ -116,18 +119,40 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
 def main():
     config = get_config()
     config["output_folder"] = os.path.abspath(config["output_folder"])
-    ffmpeg_info = get_ffmpeg_info()
 
+    # --- FFmpeg チェック & 自動ダウンロード ---
+    ffmpeg_info = get_ffmpeg_info()
+    if not check_ffmpeg(ffmpeg_info['path']):
+        print("⚠️ FFmpeg が見つからないか、正常に動作しません。")
+        while True:
+            ans = input("自動的にダウンロードしますか？ (y/n): ").strip().lower()
+            if ans in ('y', 'n'):
+                break
+            print("y または n を入力してください。")
+        if ans == 'y':
+            def dl_progress(done, total):
+                percent = (done / total) * 100 if total else 0
+                print(f"\rFFmpeg ダウンロード中: {done}/{total} bytes ({percent:.1f}%)", end='')
+            new_path = download_ffmpeg(progress_callback=dl_progress)
+            if new_path:
+                print("\n✅ FFmpeg のダウンロードが完了しました。")
+                ffmpeg_info = get_ffmpeg_info()   # 再取得 (downloaded がヒット)
+            else:
+                print("\n❌ ダウンロードに失敗しました。FFmpeg なしで続行します。")
+        else:
+            print("FFmpeg なしで続行します。音量正規化は利用できません。")
+
+    # --- メインループ ---
     while True:
         os.system('cls' if os.name == 'nt' else 'clear')
 
-        print(f"========== VibeDL v1.2 ==========")
+        print(f"========== VibeDL v1.3 ==========")
         print(f" 保存先: {config['output_folder']}")
         print(f" フォーマット: {config['output_format']} / {config['bitrate']}")
         print(f" 音量正規化: {'ON' if config['normalize'] else 'OFF'} ({config['target_lufs']} LUFS)")
         print(f" メタデータ: {'ON' if config['embed_metadata'] else 'OFF'}")
         print(f" FFmpeg: {ffmpeg_info['source']}モード")
-        if ffmpeg_info['source'] in ('bundled', 'local'):
+        if ffmpeg_info['source'] in ('bundled', 'local', 'downloaded'):
             print(f"  └ 場所: {ffmpeg_info['location']}")
         print("---------------------------------")
         print(" 1: YouTubeからダウンロード")
