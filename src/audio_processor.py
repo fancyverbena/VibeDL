@@ -8,6 +8,7 @@ import tempfile
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC, TPE1, TIT2, TALB, ID3NoHeaderError
 from mutagen.mp4 import MP4, MP4Cover
+from mutagen.flac import FLAC, Picture
 
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
@@ -56,7 +57,7 @@ def download_ffmpeg(progress_callback=None):
                         shutil.copy2(src, ffmpeg_exe)
                         break
 
-        os.unlink(tmp_zip_path)  # 一時ZIP削除
+        os.unlink(tmp_zip_path)
 
         if os.path.isfile(ffmpeg_exe) and check_ffmpeg(ffmpeg_exe):
             print("FFmpegの準備が完了しました。")
@@ -153,6 +154,25 @@ def embed_metadata(file_path, title, artist, thumb_url):
             try:
                 img_data = requests.get(thumb_url, timeout=10).content
                 audio['covr'] = [MP4Cover(img_data, imageformat=MP4Cover.FORMAT_JPEG)]
+            except requests.exceptions.RequestException:
+                pass
+        audio.save()
+
+    elif ext == '.flac':
+        audio = FLAC(file_path)
+        audio['title'] = title
+        audio['artist'] = artist
+        audio['album'] = 'VibeDL'
+
+        if thumb_url:
+            try:
+                img_data = requests.get(thumb_url, timeout=10).content
+                pic = Picture()
+                pic.type = 3
+                pic.mime = 'image/jpeg'
+                pic.desc = 'Cover'
+                pic.data = img_data
+                audio.add_picture(pic)
             except requests.exceptions.RequestException:
                 pass
         audio.save()

@@ -64,6 +64,16 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'm4a',
         })
+    elif output_format == "wav":
+        postprocessors.append({
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'wav',
+        })
+    elif output_format == "flac":
+        postprocessors.append({
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'flac',
+        })
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -93,6 +103,10 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
                     raw_path = raw_path.rsplit('.', 1)[0] + ".mp3"
                 elif output_format == "m4a":
                     raw_path = raw_path.rsplit('.', 1)[0] + ".m4a"
+                elif output_format == "wav":
+                    raw_path = raw_path.rsplit('.', 1)[0] + ".wav"
+                elif output_format == "flac":
+                    raw_path = raw_path.rsplit('.', 1)[0] + ".flac"
 
                 if start_sec is not None and end_sec is not None:
                     try:
