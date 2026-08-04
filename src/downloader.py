@@ -45,7 +45,7 @@ def format_time(seconds):
             parts += f"{s}s"
         return parts
 
-def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None):
+def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}"):
     output_dir = os.path.abspath(output_dir)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -131,18 +131,24 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
                     except:
                         pass
 
-                cleaned_title = clean_title(info.get('title', 'Unknown'))
+                title_clean = clean_title(info.get('title', 'Unknown'))
+                uploader_clean = clean_title(info.get('uploader', 'Unknown'))
+                video_id = info.get('id', '')
+                filename = name_template.format(title=title_clean, uploader=uploader_clean, id=video_id, ext=output_format)
+                filename = re.sub(r'[\\/:*?"<>|]', '', filename)
+                if not filename.strip():
+                    filename = "unknown"
                 if start_sec is not None and end_sec is not None:
                     time_suffix = f" [{format_time(start_sec)}-{format_time(end_sec)}]"
                 else:
                     time_suffix = ""
-                final_dest = get_unique_path(os.path.join(output_dir, f"{cleaned_title}{time_suffix}.{output_format}"))
+                final_dest = get_unique_path(os.path.join(output_dir, f"{filename}{time_suffix}.{output_format}"))
 
                 return {
                     'temp_raw': raw_path,
                     'dest_path': final_dest,
-                    'title': cleaned_title,
-                    'uploader': info.get('uploader', 'Unknown'),
+                    'title': title_clean,
+                    'uploader': uploader_clean,
                     'thumb': info.get('thumbnail')
                 }
         except Exception as e:

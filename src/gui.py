@@ -4,7 +4,7 @@ import os
 import threading
 import math
 import winsound
-
+import time
 from downloader import download_audio
 from audio_processor import (
     normalize_audio, embed_metadata,
@@ -52,33 +52,40 @@ def create_folder_bitmap(size=24, color=wx.Colour(80, 80, 80)):
     return bitmap
 
 
-class DownloadThread(threading.Thread):
-    def __init__(self, parent, url, config, start_sec=None, end_sec=None):
-        super().__init__()
-        self.parent = parent
+class QueueItem:
+    def __init__(self, url, start_sec, end_sec):
         self.url = url
-        self.config = config
         self.start_sec = start_sec
         self.end_sec = end_sec
+        self.status = "waiting"
+
+class DownloadWorker(threading.Thread):
+    def __init__(self, parent, item, config):
+        super().__init__()
+        self.parent = parent
+        self.item = item
+        self.config = config
         self.daemon = True
 
     def run(self):
         try:
-            wx.CallAfter(self.parent.update_progress, 0)
-            wx.CallAfter(self.parent.log, f"処理中: {self.url}")
+            self.item.status = "downloading"
+            wx.CallAfter(self.parent.update_queue_display)
+            wx.CallAfter(self.parent.log, f"処理中: {self.item.url}")
             output_dir = self.config["output_folder"]
             fmt = self.config["output_format"]
             br = self.config["bitrate"]
+            name_template = self.config.get("name_template", "{title}")
 
             data = download_audio(
-                self.url, output_dir,
+                self.item.url, output_dir,
                 output_format=fmt, bitrate=br,
                 progress_hook=None,
-                start_sec=self.start_sec,
-                end_sec=self.end_sec
+                start_sec=self.item.start_sec,
+                end_sec=self.item.end_sec,
+                name_template=name_template
             )
             wx.CallAfter(self.parent.log, "[1/3] ダウンロード完了")
-            wx.CallAfter(self.parent.update_progress, 33)
             temp_out = data['temp_raw']
 
             if self.config["normalize"] and check_ffmpeg(self.parent.ffmpeg_info['path']):
@@ -92,12 +99,10 @@ class DownloadThread(threading.Thread):
                     wx.CallAfter(self.parent.log, "音量調整に失敗しました。")
             else:
                 wx.CallAfter(self.parent.log, "音量正規化をスキップ")
-            wx.CallAfter(self.parent.update_progress, 66)
 
             if self.config["embed_metadata"]:
                 wx.CallAfter(self.parent.log, "[3/3] メタデータ埋め込み中...")
                 embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
-            wx.CallAfter(self.parent.update_progress, 100)
 
             if os.path.exists(data['dest_path']):
                 os.remove(data['dest_path'])
@@ -107,16 +112,15 @@ class DownloadThread(threading.Thread):
                 os.remove(data['temp_raw'])
 
             wx.CallAfter(self.parent.log, f"✨ 完了: {data['dest_path']}")
-            wx.CallAfter(self.parent.on_download_success, data['dest_path'])
+            wx.CallAfter(self.parent.on_item_completed, self.item, data['dest_path'])
         except Exception as e:
-            wx.CallAfter(self.parent.log, f"❌ エラー: {e}")
-            wx.CallAfter(self.parent.update_progress, 0)
-            wx.CallAfter(self.parent.on_download_finished)
+            wx.CallAfter(self.parent.log, f"❌ エラー ({self.item.url}): {e}")
+            wx.CallAfter(self.parent.on_item_completed, self.item, None)
 
 
 class VibeDLFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="VibeDL - Audio Downloader", size=(750, 550))
+        super().__init__(None, title="VibeDL - Audio Downloader", size=(850, 650))
         self.ffmpeg_info = get_ffmpeg_info()
         self.config = {
             "target_lufs": -14.0,
@@ -127,13 +131,22 @@ class VibeDLFrame(wx.Frame):
             "embed_metadata": True,
             "dark_mode": False,
             "notify_sound": True,
-            "notify_toast": True
+            "notify_toast": True,
+            "clipboard_monitor": False,
+            "url_history": [],
+            "name_template": "{title}"
         }
+        self.queue = []
+        self.active_workers = []
+        self.max_workers = 2
         self.last_dest_path = None
+        self.clipboard_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.on_clipboard_timer, self.clipboard_timer)
         self.init_ui()
         self.apply_theme()
         self.update_settings_display()
         self.check_ffmpeg_on_startup()
+        self.update_clipboard_monitor()
         self.Centre()
 
     def init_ui(self):
@@ -144,9 +157,10 @@ class VibeDLFrame(wx.Frame):
         input_sizer.AddGrowableCol(1, 1)
 
         url_label = wx.StaticText(self.panel, label="YouTube URL:")
-        self.url_ctrl = wx.TextCtrl(self.panel, style=wx.TE_PROCESS_ENTER)
+        self.url_ctrl = wx.ComboBox(self.panel, style=wx.CB_DROPDOWN | wx.TE_PROCESS_ENTER)
         self.url_ctrl.SetHint("https://www.youtube.com/...")
-        self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_download)
+        self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_add_to_queue)
+        self._populate_url_history()
         input_sizer.Add(url_label, 0, wx.ALIGN_CENTER_VERTICAL)
         input_sizer.Add(self.url_ctrl, 1, wx.EXPAND)
 
@@ -172,32 +186,43 @@ class VibeDLFrame(wx.Frame):
 
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        self.dl_btn = wx.Button(self.panel, label="ダウンロード開始", size=(200, 40))
-        dl_font = self.dl_btn.GetFont()
-        dl_font.SetWeight(wx.FONTWEIGHT_BOLD)
-        self.dl_btn.SetFont(dl_font)
-        self.dl_btn.SetBackgroundColour(wx.Colour(0, 120, 215))
-        self.dl_btn.SetForegroundColour(wx.Colour(255, 255, 255))
-        self.dl_btn.Bind(wx.EVT_BUTTON, self.on_download)
-        btn_sizer.Add(self.dl_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        self.add_queue_btn = wx.Button(self.panel, label="キューに追加", size=(140, 32))
+        self.add_queue_btn.Bind(wx.EVT_BUTTON, self.on_add_to_queue)
+        btn_sizer.Add(self.add_queue_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+
+        self.start_queue_btn = wx.Button(self.panel, label="キューを開始", size=(140, 32))
+        self.start_queue_btn.SetBackgroundColour(wx.Colour(0, 150, 0))
+        self.start_queue_btn.SetForegroundColour(wx.Colour(255, 255, 255))
+        self.start_queue_btn.Bind(wx.EVT_BUTTON, self.on_start_queue)
+        btn_sizer.Add(self.start_queue_btn, 0, wx.LEFT, 10)
+
+        self.clear_queue_btn = wx.Button(self.panel, label="キューをクリア", size=(120, 32))
+        self.clear_queue_btn.Bind(wx.EVT_BUTTON, self.on_clear_queue)
+        btn_sizer.Add(self.clear_queue_btn, 0, wx.LEFT, 10)
+
+        btn_sizer.AddStretchSpacer()
 
         gear_bmp = create_gear_bitmap()
         folder_bmp = create_folder_bitmap()
 
         self.open_folder_btn = wx.BitmapButton(self.panel, bitmap=folder_bmp, size=(32, 32))
-        self.open_folder_btn.SetToolTip("保存先フォルダを開く")
+        self.open_folder_btn.SetToolTip("最後に保存したフォルダを開く")
         self.open_folder_btn.Bind(wx.EVT_BUTTON, self.on_open_folder)
         self.open_folder_btn.Enable(False)
         btn_sizer.Add(self.open_folder_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 12)
 
-        btn_sizer.AddStretchSpacer()
-
         self.settings_btn = wx.BitmapButton(self.panel, bitmap=gear_bmp, size=(32, 32))
         self.settings_btn.SetToolTip("設定")
         self.settings_btn.Bind(wx.EVT_BUTTON, self.on_settings)
-        btn_sizer.Add(self.settings_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        btn_sizer.Add(self.settings_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 12)
 
         main_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
+
+        queue_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        queue_sizer.Add(wx.StaticText(self.panel, label="キュー:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.queue_list = wx.ListBox(self.panel, size=(-1, 80))
+        queue_sizer.Add(self.queue_list, 1, wx.EXPAND)
+        main_sizer.Add(queue_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 15)
 
         self.progress = wx.Gauge(self.panel, range=100, style=wx.GA_HORIZONTAL)
         self.progress.SetValue(0)
@@ -220,6 +245,45 @@ class VibeDLFrame(wx.Frame):
         main_sizer.Add(settings_display, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 15)
 
         self.panel.SetSizer(main_sizer)
+
+    def _populate_url_history(self):
+        self.url_ctrl.Clear()
+        history = self.config.get("url_history", [])
+        for url in history:
+            self.url_ctrl.Append(url)
+
+    def add_to_history(self, url):
+        history = self.config.get("url_history", [])
+        if url in history:
+            history.remove(url)
+        history.insert(0, url)
+        if len(history) > 10:
+            history = history[:10]
+        self.config["url_history"] = history
+        self._populate_url_history()
+
+    def update_clipboard_monitor(self):
+        if self.config.get("clipboard_monitor", False):
+            self.clipboard_timer.Start(1000)
+        else:
+            self.clipboard_timer.Stop()
+
+    def on_clipboard_timer(self, event):
+        if not wx.TheClipboard.IsOpened():
+            try:
+                if wx.TheClipboard.Open():
+                    if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_TEXT)):
+                        data = wx.TextDataObject()
+                        wx.TheClipboard.GetData(data)
+                        text = data.GetText().strip()
+                        if ("youtube.com/watch" in text or "youtu.be/" in text) and text.startswith("http"):
+                            current = self.url_ctrl.GetValue().strip()
+                            if text != current:
+                                self.url_ctrl.SetValue(text)
+                                self.log("🔗 クリップボードからURLを貼り付けました")
+                    wx.TheClipboard.Close()
+            except:
+                pass
 
     def apply_theme(self):
         dark = self.config.get("dark_mode", False)
@@ -246,13 +310,16 @@ class VibeDLFrame(wx.Frame):
                 child.SetBackgroundColour(entry_bg)
                 child.SetForegroundColour(fg)
             elif isinstance(child, wx.Button):
-                if child == self.dl_btn:
+                if child in (self.start_queue_btn, self.add_queue_btn):
                     continue
                 child.SetBackgroundColour(btn_bg)
                 child.SetForegroundColour(fg)
             elif isinstance(child, wx.BitmapButton):
                 child.SetBackgroundColour(btn_bg)
             elif isinstance(child, wx.ComboBox):
+                child.SetBackgroundColour(entry_bg)
+                child.SetForegroundColour(fg)
+            elif isinstance(child, wx.ListBox):
                 child.SetBackgroundColour(entry_bg)
                 child.SetForegroundColour(fg)
 
@@ -303,21 +370,63 @@ class VibeDLFrame(wx.Frame):
                 self.log("FFmpeg なしで続行します。音量正規化は利用不可。")
             dlg.Destroy()
 
-    def on_download(self, event):
+    def on_add_to_queue(self, event):
         url = self.url_ctrl.GetValue().strip()
         if not url:
             wx.MessageBox("URLを入力してください。", "入力エラー", wx.OK | wx.ICON_WARNING)
             return
-
         start_sec = self.parse_time(self.start_ctrl.GetValue().strip())
         end_sec = self.parse_time(self.end_ctrl.GetValue().strip())
+        item = QueueItem(url, start_sec, end_sec)
+        self.queue.append(item)
+        self.update_queue_display()
+        self.url_ctrl.SetValue("")
+        self.start_ctrl.SetValue("")
+        self.end_ctrl.SetValue("")
+        self.add_to_history(url)
+        self.log(f"キューに追加: {url}")
 
-        self.log_ctrl.Clear()
-        self.dl_btn.Disable()
-        self.open_folder_btn.Enable(False)
-        self.progress.SetValue(0)
-        thread = DownloadThread(self, url, self.config, start_sec, end_sec)
-        thread.start()
+    def update_queue_display(self):
+        self.queue_list.Clear()
+        for item in self.queue:
+            status = "⏳" if item.status == "waiting" else "⬇️" if item.status == "downloading" else "✅"
+            self.queue_list.Append(f"{status} {item.url}")
+
+    def on_start_queue(self, event):
+        if not self.queue:
+            wx.MessageBox("キューが空です。", "情報", wx.OK | wx.ICON_INFORMATION)
+            return
+        self.start_queue()
+
+    def start_queue(self):
+        while len(self.active_workers) < self.max_workers:
+            waiting = [item for item in self.queue if item.status == "waiting"]
+            if not waiting:
+                break
+            item = waiting[0]
+            worker = DownloadWorker(self, item, self.config)
+            self.active_workers.append(worker)
+            worker.start()
+
+    def on_item_completed(self, item, dest_path):
+        if item in self.queue:
+            item.status = "done"
+            if dest_path:
+                self.last_dest_path = dest_path
+                self.open_folder_btn.Enable(True)
+                self.notify_user("ダウンロード完了", os.path.basename(dest_path))
+            self.queue.remove(item)
+        self.active_workers = [w for w in self.active_workers if w.is_alive()]
+        self.update_queue_display()
+        if self.queue:
+            self.start_queue()
+
+    def on_clear_queue(self, event):
+        for item in self.queue:
+            if item.status == "waiting":
+                self.queue.remove(item)
+        self.update_queue_display()
+        self.log("キューをクリアしました。")
 
     def parse_time(self, timestr):
         if not timestr:
@@ -336,20 +445,6 @@ class VibeDLFrame(wx.Frame):
             except ValueError:
                 return None
 
-    def update_progress(self, percent):
-        self.progress.SetValue(percent)
-
-    def on_download_success(self, dest_path):
-        self.last_dest_path = dest_path
-        self.open_folder_btn.Enable(True)
-        self.dl_btn.Enable()
-        self.progress.SetValue(100)
-        self.notify_user("ダウンロード完了", os.path.basename(dest_path))
-
-    def on_download_finished(self):
-        self.dl_btn.Enable()
-        self.progress.SetValue(0)
-
     def on_open_folder(self, event):
         if self.last_dest_path:
             folder = os.path.dirname(self.last_dest_path)
@@ -361,12 +456,13 @@ class VibeDLFrame(wx.Frame):
             self.config = dlg.GetConfig()
             self.apply_theme()
             self.update_settings_display()
+            self.update_clipboard_monitor()
         dlg.Destroy()
 
 
 class SettingsDialog(wx.Dialog):
     def __init__(self, parent, config):
-        super().__init__(parent, title="設定", size=(450, 480))
+        super().__init__(parent, title="設定", size=(480, 520))
         self.config = config.copy()
         self.parent = parent
         self.init_ui()
@@ -382,7 +478,7 @@ class SettingsDialog(wx.Dialog):
 
         output_panel = wx.Panel(notebook)
         output_sizer = wx.BoxSizer(wx.VERTICAL)
-        grid_out = wx.FlexGridSizer(rows=3, cols=2, vgap=10, hgap=10)
+        grid_out = wx.FlexGridSizer(rows=4, cols=2, vgap=10, hgap=10)
         grid_out.AddGrowableCol(1, 1)
 
         fmt_label = wx.StaticText(output_panel, label="フォーマット:")
@@ -409,6 +505,12 @@ class SettingsDialog(wx.Dialog):
         grid_out.Add(folder_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         grid_out.Add(folder_sizer, 1, wx.EXPAND)
 
+        name_label = wx.StaticText(output_panel, label="ファイル名パターン:")
+        self.name_template_ctrl = wx.TextCtrl(output_panel, value=self.config.get("name_template", "{title}"))
+        self.name_template_ctrl.SetHint("{title} - {uploader}")
+        grid_out.Add(name_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
+        grid_out.Add(self.name_template_ctrl, 1, wx.EXPAND)
+
         output_sizer.Add(grid_out, 0, wx.EXPAND | wx.ALL, 15)
         output_panel.SetSizer(output_sizer)
         notebook.AddPage(output_panel, "出力")
@@ -432,11 +534,6 @@ class SettingsDialog(wx.Dialog):
         self.meta_cb.SetValue(self.config["embed_metadata"])
         proc_sizer.Add(self.meta_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
-        self.dark_cb = wx.CheckBox(proc_panel, label="ダークモード")
-        self.dark_cb.SetValue(self.config.get("dark_mode", False))
-        self.dark_cb.Bind(wx.EVT_CHECKBOX, self.on_dark_toggle)
-        proc_sizer.Add(self.dark_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
-
         self.on_normalize_toggle(None)
         proc_panel.SetSizer(proc_sizer)
         notebook.AddPage(proc_panel, "処理")
@@ -451,6 +548,18 @@ class SettingsDialog(wx.Dialog):
         notif_sizer.Add(self.toast_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
         notif_panel.SetSizer(notif_sizer)
         notebook.AddPage(notif_panel, "通知")
+
+        general_panel = wx.Panel(notebook)
+        general_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.dark_cb = wx.CheckBox(general_panel, label="ダークモード")
+        self.dark_cb.SetValue(self.config.get("dark_mode", False))
+        self.dark_cb.Bind(wx.EVT_CHECKBOX, self.on_dark_toggle)
+        general_sizer.Add(self.dark_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 15)
+        self.clipboard_cb = wx.CheckBox(general_panel, label="クリップボードを監視してURLを自動入力")
+        self.clipboard_cb.SetValue(self.config.get("clipboard_monitor", False))
+        general_sizer.Add(self.clipboard_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
+        general_panel.SetSizer(general_sizer)
+        notebook.AddPage(general_panel, "一般")
 
         sizer.Add(notebook, 1, wx.EXPAND | wx.ALL, 10)
 
@@ -524,6 +633,8 @@ class SettingsDialog(wx.Dialog):
         self.config["dark_mode"] = self.dark_cb.GetValue()
         self.config["notify_sound"] = self.sound_cb.GetValue()
         self.config["notify_toast"] = self.toast_cb.GetValue()
+        self.config["clipboard_monitor"] = self.clipboard_cb.GetValue()
+        self.config["name_template"] = self.name_template_ctrl.GetValue().strip() or "{title}"
         return self.config
 
 
