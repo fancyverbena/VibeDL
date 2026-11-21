@@ -147,6 +147,29 @@ python src/gui.py
 * 🪟 **Windows 専用**です（macOS / Linux には非対応）。
 * 🐛 バグ報告や機能リクエストは Issues へ。
 
+## exeのビルドと配布
+
+単一ファイルの exe（`VibeDL.exe`）を PyInstaller で生成できます。
+
+### ビルド
+
+```
+build.bat
+```
+
+依存パッケージのインストール、アイコン生成（`tools/make_icon.py` → `assets/icon.ico`）、PyInstaller の実行まで自動で行い、`dist\VibeDL.exe` が生成されます。設定は `VibeDL.spec`、ビルド専用の依存は `requirements-build.txt` にあります。
+
+### 配布（GitHub Releases）
+
+1. `build.bat` で exe を生成
+2. リポジトリの Releases から「Draft a new release」を開く
+3. タグ（例：`v1.0.0`）を作成し、`dist\VibeDL.exe` を添付して公開
+
+### exe版の注意
+
+* FFmpeg は同梱していません。PATH に無い環境では、初回起動時に自動ダウンロードされます（SHA256 検証付き）。
+* 未署名の exe のため、初回実行時に Windows SmartScreen の警告が出る場合があります。
+
 ## ライセンス
 [MIT License](https://opensource.org/licenses/MIT)
 
