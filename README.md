@@ -64,10 +64,10 @@ YouTube から最高の「Vibe（雰囲気）」をそのままに、音量を�
 git clone [https://github.com/fancyverbena/VibeDL.git](https://github.com/fancyverbena/VibeDL.git)
 cd VibeDL
 pip install -r requirements.txt
-python src/main.py
+python src/gui.py
 ```
 
-補足：ソースコードから実行する場合、FFmpeg がシステム PATH に通っている必要があります。実行ファイル版では自動ダウンロードされます。
+補足：GUI版の入り口は `src/gui.py` です。コマンドライン版を使う場合は `python src/main.py` で起動します（設定はGUI版と共通で、レジストリに保存されます）。FFmpeg が見つからない場合は、初回起動時に自動ダウンロードが提案されます（ダウンロードされた FFmpeg は変換・ノーマライズの両方に使われます）。
 
 ## 使い方
 ### メイン画面

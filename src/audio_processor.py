@@ -32,6 +32,7 @@ def download_ffmpeg(progress_callback=None):
     os.makedirs(dest_dir, exist_ok=True)
 
     print("FFmpegのダウンロードを開始します...")
+    tmp_zip_path = None
     try:
         response = requests.get(FFMPEG_DOWNLOAD_URL, stream=True, timeout=30)
         response.raise_for_status()
@@ -48,16 +49,23 @@ def download_ffmpeg(progress_callback=None):
             tmp_zip_path = tmp_zip.name
 
         print("ダウンロード完了。展開中...")
+        # ffmpeg.exe だけでなく ffprobe.exe も取り出す。
+        # yt-dlp の後処理や情報取得には ffprobe が必要なため。
+        wanted = {'ffmpeg.exe': ffmpeg_exe,
+                  'ffprobe.exe': os.path.join(dest_dir, 'ffprobe.exe')}
+        found = set()
         with tempfile.TemporaryDirectory() as tmp_extract:
             with zipfile.ZipFile(tmp_zip_path, 'r') as zf:
                 for member in zf.namelist():
-                    if member.endswith('ffmpeg.exe') and 'bin' in member:
+                    name = os.path.basename(member)
+                    if name in wanted and 'bin' in member:
                         zf.extract(member, tmp_extract)
                         src = os.path.join(tmp_extract, member)
-                        shutil.copy2(src, ffmpeg_exe)
-                        break
+                        shutil.copy2(src, wanted[name])
+                        found.add(name)
 
-        os.unlink(tmp_zip_path)
+        if 'ffmpeg.exe' not in found:
+            raise Exception("zip内にffmpeg.exeが見つかりませんでした。")
 
         if os.path.isfile(ffmpeg_exe) and check_ffmpeg(ffmpeg_exe):
             print("FFmpegの準備が完了しました。")
@@ -69,6 +77,9 @@ def download_ffmpeg(progress_callback=None):
         if os.path.isfile(ffmpeg_exe):
             os.remove(ffmpeg_exe)
         return None
+    finally:
+        if tmp_zip_path and os.path.exists(tmp_zip_path):
+            os.unlink(tmp_zip_path)
 
 def get_ffmpeg_info():
     if hasattr(sys, '_MEIPASS'):
@@ -93,6 +104,18 @@ def get_ffmpeg_info():
 
 def get_ffmpeg_path():
     return get_ffmpeg_info()['path']
+
+def get_ffmpeg_location():
+    """yt-dlp の ffmpeg_location に渡す値。
+
+    実ファイルが見つかった場合は、そのフォルダ（ffmpeg.exe と
+    ffprobe.exe が並ぶ場所）を返す。システムPATH上の ffmpeg を
+    使う場合は None を返し、yt-dlp の既定の探索に任せる。
+    """
+    path = get_ffmpeg_info()['path']
+    if os.path.isfile(path):
+        return os.path.dirname(path)
+    return None
 
 def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None):
     if ffmpeg_info is None:

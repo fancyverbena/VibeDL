@@ -1,0 +1,4 @@
+wxPython>=4.2
+yt-dlp>=2024.1
+mutagen>=1.47
+requests>=2.31

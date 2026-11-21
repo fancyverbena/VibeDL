@@ -2,8 +2,7 @@ import yt_dlp
 import os
 import re
 import time
-import subprocess
-from audio_processor import get_ffmpeg_path
+from audio_processor import get_ffmpeg_location
 
 def clean_title(title):
     patterns = [
@@ -85,6 +84,12 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         'postprocessor_args': [],
     }
 
+    # 自動ダウンロード／同梱された FFmpeg を yt-dlp の変換にも使う。
+    # これが無いと、PATH に FFmpeg が無い環境では変換が失敗する。
+    ffmpeg_location = get_ffmpeg_location()
+    if ffmpeg_location:
+        ydl_opts['ffmpeg_location'] = ffmpeg_location
+
     if start_sec is not None and end_sec is not None:
         def section_func(info_dict, ydl):
             return [{'start_time': start_sec, 'end_time': end_sec, 'title': 'section'}]
@@ -108,28 +113,10 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
                 elif output_format == "flac":
                     raw_path = raw_path.rsplit('.', 1)[0] + ".flac"
 
-                if start_sec is not None and end_sec is not None:
-                    try:
-                        import mutagen
-                        audio_info = mutagen.File(raw_path)
-                        if audio_info is not None:
-                            duration = audio_info.info.length
-                            if duration > (end_sec - start_sec) * 1.1:
-                                print("範囲指定を再適用中（FFmpegで切り出し）...")
-                                trimmed_path = raw_path.rsplit('.', 1)[0] + "_trimmed." + output_format
-                                cmd = [
-                                    get_ffmpeg_path(),
-                                    '-y', '-i', raw_path,
-                                    '-ss', str(start_sec),
-                                    '-to', str(end_sec),
-                                    '-c', 'copy',
-                                    trimmed_path
-                                ]
-                                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                os.remove(raw_path)
-                                os.rename(trimmed_path, raw_path)
-                    except:
-                        pass
+                # 範囲指定は download_ranges でダウンロード時に適用済み。
+                # 以前はここで長さを推測して -ss 開始時刻 で再トリムしていたが、
+                # 切り済みファイルに絶対時刻を再適用するため誤った区間に
+                # なっていたので削除した。
 
                 title_clean = clean_title(info.get('title', 'Unknown'))
                 uploader_clean = clean_title(info.get('uploader', 'Unknown'))
