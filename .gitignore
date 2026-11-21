@@ -3,6 +3,8 @@ __pycache__/
 build/
 dist/
 *.spec
+!VibeDL.spec
+assets/icon.ico
 *.exe
 *.zip
 ffmpeg.exe
