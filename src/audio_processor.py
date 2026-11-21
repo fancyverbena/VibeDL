@@ -1,6 +1,9 @@
 import subprocess
 import os
 import sys
+import json
+import re
+import hashlib
 import requests
 import zipfile
 import shutil
@@ -22,6 +25,30 @@ def check_ffmpeg(ffmpeg_path):
         return True
     except Exception:
         return False
+
+def _fetch_expected_sha256(url):
+    """公式の .sha256 ファイルから期待されるハッシュを取得する。
+
+    取得できない・形式が不正な場合は None（検証を中止させる）。
+    """
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        token = resp.text.strip().split()[0].lower()
+        if re.fullmatch(r'[0-9a-f]{64}', token):
+            return token
+    except Exception as e:
+        print(f"公式SHA256の取得に失敗しました: {e}")
+    return None
+
+
+def _file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def download_ffmpeg(progress_callback=None):
     dest_dir = get_default_ffmpeg_download_dir()
@@ -48,7 +75,16 @@ def download_ffmpeg(progress_callback=None):
                         progress_callback(downloaded, total_size)
             tmp_zip_path = tmp_zip.name
 
-        print("ダウンロード完了。展開中...")
+        # 展開前に、配布元が公開している SHA256 と照合する。
+        # 取得できない場合も含め、検証できないものは使わない。
+        print("ダウンロード完了。SHA256を検証中...")
+        expected = _fetch_expected_sha256(FFMPEG_DOWNLOAD_URL + ".sha256")
+        if expected is None:
+            raise Exception("公式のSHA256を取得できなかったため、検証を中止しました。")
+        actual = _file_sha256(tmp_zip_path)
+        if actual != expected:
+            raise Exception("SHA256が一致しませんでした。ダウンロードを中止します。")
+        print("SHA256検証OK。展開中...")
         # ffmpeg.exe だけでなく ffprobe.exe も取り出す。
         # yt-dlp の後処理や情報取得には ffprobe が必要なため。
         wanted = {'ffmpeg.exe': ffmpeg_exe,
@@ -117,7 +153,49 @@ def get_ffmpeg_location():
         return os.path.dirname(path)
     return None
 
-def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None):
+def _encoder_args(ext, bitrate):
+    """出力形式に合わせたエンコーダ引数。
+
+    bitrate（例 '256k'）が指定されればそれを反映し、無ければ従来通り
+    可変品質 (-q:a 2) を使う。可逆形式はビットレート指定を無視する。
+    """
+    ext = ext.lower()
+    if ext == '.flac':
+        return ['-c:a', 'flac']
+    if ext == '.wav':
+        return ['-c:a', 'pcm_s16le']
+    if bitrate:
+        codec = 'aac' if ext == '.m4a' else 'libmp3lame'
+        return ['-c:a', codec, '-b:a', bitrate]
+    return ['-q:a', '2']
+
+
+def _measure_loudness(ffmpeg_bin, input_path, target_lufs):
+    """loudnorm の 1 パス目: 入力のラウドネスを測定して dict で返す。
+
+    失敗したら None（呼び出し側は従来の 1 パス処理にフォールバック）。
+    """
+    filt = f"loudnorm=I={target_lufs}:TP=-2.0:LRA=11:print_format=json"
+    try:
+        result = subprocess.run(
+            [ffmpeg_bin, '-i', input_path, '-af', filt, '-f', 'null', '-'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, timeout=600)
+        m = re.search(r'\{[^{}]*"input_i"[^{}]*\}', result.stderr or '')
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+        needed = ('input_i', 'input_tp', 'input_lra', 'input_thresh',
+                  'target_offset')
+        if all(k in data for k in needed):
+            return data
+    except Exception as e:
+        print(f"ラウドネス測定に失敗しました（1パス処理で続行）: {e}")
+    return None
+
+
+def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None,
+                    bitrate=None):
     if ffmpeg_info is None:
         ffmpeg_info = get_ffmpeg_info()
 
@@ -125,10 +203,26 @@ def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None):
     base, ext = os.path.splitext(input_path)
     output_path = f"{base}_tmp{ext}"
 
+    # 2パス loudnorm: まず測定し、その結果を渡すことで線形調整
+    # （音質劣化の少ない一律ゲイン）が可能になる。測定できなければ
+    # 従来の1パス処理にフォールバックする。
+    measured = _measure_loudness(ffmpeg_bin, input_path, target_lufs)
+    if measured:
+        loudnorm_filter = (
+            f"loudnorm=I={target_lufs}:TP=-2.0:LRA=11"
+            f":measured_I={measured['input_i']}"
+            f":measured_TP={measured['input_tp']}"
+            f":measured_LRA={measured['input_lra']}"
+            f":measured_thresh={measured['input_thresh']}"
+            f":offset={measured['target_offset']}:linear=true"
+        )
+    else:
+        loudnorm_filter = f"loudnorm=I={target_lufs}:TP=-2.0:LRA=11"
+
     cmd = [
         ffmpeg_bin, '-y', '-i', input_path,
-        '-af', f"loudnorm=I={target_lufs}:TP=-2.0:LRA=11",
-        '-q:a', '2',
+        '-af', loudnorm_filter,
+        *_encoder_args(ext, bitrate),
         output_path
     ]
 
