@@ -30,7 +30,7 @@ YouTube から最高の「Vibe（雰囲気）」をそのままに、音量を�
 
 ### 🎨 UI/UX
 
-* 🖥️ **直感的な GUI（wxPython）**：タブ分け設定画面、進捗バー、速度表示
+* 🖥️ **直感的な GUI（PySide6 / Qt）**：タブ分け設定画面、進捗バー、速度表示、ダークモード
 * 🌙 **ダークモード**：目に優しい配色に切り替え
 * 🔔 **通知機能**：完了時にサウンド + Windows トースト通知
 * 🌐 **多言語対応**：日本語 / English（設定で切替）
@@ -141,4 +141,4 @@ python src/gui.py
 ## ライセンス
 [MIT License](https://opensource.org/licenses/MIT)
 
-*Powered by Python (wxPython, yt-dlp, mutagen) & FFmpeg*
+*Powered by Python (PySide6, yt-dlp, mutagen) & FFmpeg*

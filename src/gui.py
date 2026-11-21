@@ -1,113 +1,139 @@
-import wx
-import wx.adv
+"""VibeDL GUI (PySide6 / Qt)
+
+wxPython 版から移行した GUI。見た目は QSS（Qt Style Sheets）で
+一元管理し、カード型レイアウト + アクセントカラーで統一している。
+ダウンロード・音声処理・設定保存は従来モジュールをそのまま使う。
+"""
 import os
-import threading
-import math
+import sys
 import winsound
+
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+    QProgressDialog, QPushButton, QTabWidget, QVBoxLayout, QWidget,
+    QSystemTrayIcon,
+)
+
 from downloader import download_audio
 from audio_processor import (
     normalize_audio, embed_metadata,
-    get_ffmpeg_info, check_ffmpeg, download_ffmpeg
+    get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
 )
 from config_store import get_config, save_config
 
-def get_palette(dark):
-    """テーマ色一式。ライトはOS標準色、ダークは固定パレット。"""
-    if dark:
-        return {
-            "bg": wx.Colour(45, 45, 48),
-            "fg": wx.Colour(241, 241, 241),
-            "entry_bg": wx.Colour(60, 60, 60),
-            "log_bg": wx.Colour(30, 30, 30),
-            "btn_bg": wx.Colour(85, 85, 85),
-            "icon_fg": wx.Colour(220, 220, 220),
-        }
-    return {
-        "bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
-        "fg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT),
-        "entry_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
-        "log_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
-        "btn_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE),
-        "icon_fg": wx.Colour(80, 80, 80),
+ACCENT = "#7C5CFF"
+
+PALETTES = {
+    True: {  # dark
+        "bg": "#202228", "surface": "#2B2E35", "entry": "#1C1E23",
+        "fg": "#F2F2F2", "muted": "#A7ABB3", "border": "#3A3E47",
+        "btn": "#3A3E47", "btn_hover": "#464B57", "track": "#3A3E47",
+        "log_bg": "#181A1E",
+    },
+    False: {  # light
+        "bg": "#E9EBEF", "surface": "#FFFFFF", "entry": "#FFFFFF",
+        "fg": "#1C1E22", "muted": "#6E737A", "border": "#D6D9DE",
+        "btn": "#FFFFFF", "btn_hover": "#F0F1F5", "track": "#D6D9DE",
+        "log_bg": "#FFFFFF",
+    },
+}
+
+
+def build_stylesheet(dark):
+    p = PALETTES[dark]
+    qss = """
+    QMainWindow, QDialog { background: @BG@; }
+    QWidget { color: @FG@; font-family: "Segoe UI", "Yu Gothic UI", sans-serif; font-size: 10pt; }
+    QFrame#card { background: @SURFACE@; border: 1px solid @BORDER@; border-radius: 12px; }
+    QLabel#section { color: @ACCENT@; font-size: 12pt; font-weight: bold; }
+    QLabel#appTitle { font-size: 20pt; font-weight: bold; }
+    QLabel#muted { color: @MUTED@; }
+    QLineEdit, QComboBox, QDoubleSpinBox {
+        background: @ENTRY@; border: 1px solid @BORDER@; border-radius: 8px;
+        padding: 6px 10px; min-height: 20px;
     }
-
-
-def apply_theme_recursive(window, dark, accent_controls=()):
-    """ウィンドウ配下の全コントロールへテーマを再帰適用する。
-
-    以前はパネル直下の子だけが対象で、入れ子のコントロールや
-    設定ダイアログの一部にテーマが効いていなかった。
-    accent_controls に渡したボタンは強調表示のまま維持する。
+    QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid @ACCENT@; }
+    QComboBox::drop-down { border: none; width: 24px; }
+    QPushButton {
+        background: @BTN@; border: 1px solid @BORDER@; border-radius: 8px;
+        padding: 8px 16px; min-height: 20px;
+    }
+    QPushButton:hover { background: @BTN_HOVER@; }
+    QPushButton:disabled { color: @MUTED@; }
+    QPushButton#primary { background: @ACCENT@; color: #FFFFFF; border: none; font-weight: bold; }
+    QPushButton#primary:hover { background: #8F73FF; }
+    QPushButton#primary:disabled { background: @TRACK@; color: @MUTED@; }
+    QListWidget { background: transparent; border: none; outline: none; }
+    QListWidget::item { padding: 6px 8px; border-radius: 6px; }
+    QListWidget::item:selected { background: rgba(124, 92, 255, 0.25); }
+    QProgressBar {
+        background: @TRACK@; border: none; border-radius: 8px;
+        min-height: 16px; max-height: 16px; text-align: center;
+        color: @FG@; font-size: 8pt; font-weight: bold;
+    }
+    QProgressBar::chunk { background: @ACCENT@; border-radius: 8px; }
+    QPlainTextEdit {
+        background: @LOG_BG@; border: none; border-radius: 8px;
+        font-family: Consolas, "Courier New", monospace; font-size: 9pt; padding: 6px;
+    }
+    QTabWidget::pane { border: 1px solid @BORDER@; border-radius: 8px; background: @SURFACE@; }
+    QTabBar::tab {
+        background: transparent; color: @MUTED@; padding: 8px 18px; border: none;
+    }
+    QTabBar::tab:selected { color: @ACCENT@; font-weight: bold; }
+    QCheckBox { spacing: 8px; }
+    QStatusBar { background: @BG@; color: @MUTED@; }
+    QToolTip { background: @SURFACE@; color: @FG@; border: 1px solid @BORDER@; padding: 4px; }
     """
-    palette = get_palette(dark)
-    window.SetBackgroundColour(palette["bg"])
-    for child in window.GetChildren():
-        if isinstance(child, wx.StaticText):
-            child.SetForegroundColour(palette["fg"])
-        elif isinstance(child, (wx.TextCtrl, wx.ComboBox, wx.ListBox, wx.SpinCtrlDouble)):
-            child.SetBackgroundColour(palette["entry_bg"])
-            child.SetForegroundColour(palette["fg"])
-        elif isinstance(child, (wx.Button, wx.BitmapButton)):
-            if child not in accent_controls:
-                child.SetBackgroundColour(palette["btn_bg"])
-                child.SetForegroundColour(palette["fg"])
-        elif isinstance(child, wx.CheckBox):
-            child.SetForegroundColour(palette["fg"])
-        apply_theme_recursive(child, dark, accent_controls)
-    window.Refresh()
+    return (qss.replace("@BG@", p["bg"]).replace("@SURFACE@", p["surface"])
+            .replace("@ENTRY@", p["entry"]).replace("@FG@", p["fg"])
+            .replace("@MUTED@", p["muted"]).replace("@BORDER@", p["border"])
+            .replace("@BTN@", p["btn"]).replace("@BTN_HOVER@", p["btn_hover"])
+            .replace("@TRACK@", p["track"]).replace("@LOG_BG@", p["log_bg"])
+            .replace("@ACCENT@", ACCENT))
 
 
-def make_section_label(parent, text):
-    label = wx.StaticText(parent, label=text)
-    font = label.GetFont()
-    font.SetWeight(wx.FONTWEIGHT_BOLD)
-    label.SetFont(font)
-    return label
+def make_app_icon():
+    """アプリアイコンをコードで描く（外部ファイル不要）。"""
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    from PySide6.QtGui import QColor
+    painter.setBrush(QColor(ACCENT))
+    painter.setPen(Qt.NoPen)
+    painter.drawRoundedRect(2, 2, 60, 60, 14, 14)
+    painter.setPen(QColor("#FFFFFF"))
+    font = QFont("Segoe UI", 30)
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, "V")
+    painter.end()
+    return QIcon(pixmap)
 
 
-def create_gear_bitmap(size=24, color=wx.Colour(80, 80, 80), bg=None):
-    if bg is None:
-        bg = wx.Colour(240, 240, 240)
-    bitmap = wx.Bitmap(size, size)
-    mdc = wx.MemoryDC(bitmap)
-    mdc.SetBackground(wx.Brush(bg))
-    mdc.Clear()
-    gc = wx.GraphicsContext.Create(mdc)
-    gc.SetPen(wx.Pen(color, 2))
-    gc.SetBrush(wx.Brush(color))
-    cx, cy = size/2, size/2
-    r_outer = size/2 - 3
-    r_inner = r_outer - 5
-    gc.DrawEllipse(cx - r_outer, cy - r_outer, r_outer*2, r_outer*2)
-    gc.SetBrush(wx.Brush(bg))
-    gc.DrawEllipse(cx - r_inner, cy - r_inner, r_inner*2, r_inner*2)
-    gc.SetBrush(wx.Brush(color))
-    tooth_w = 4
-    tooth_h = 6
-    for angle in range(0, 360, 45):
-        rad = angle * math.pi / 180
-        tx = cx + (r_outer - 1) * math.cos(rad) - tooth_w/2
-        ty = cy + (r_outer - 1) * math.sin(rad) - tooth_h/2
-        gc.DrawRectangle(tx, ty, tooth_w, tooth_h)
-    del gc
-    mdc.SelectObject(wx.NullBitmap)
-    return bitmap
-
-def create_folder_bitmap(size=24, color=wx.Colour(80, 80, 80), bg=None):
-    if bg is None:
-        bg = wx.Colour(240, 240, 240)
-    bitmap = wx.Bitmap(size, size)
-    mdc = wx.MemoryDC(bitmap)
-    mdc.SetBackground(wx.Brush(bg))
-    mdc.Clear()
-    gc = wx.GraphicsContext.Create(mdc)
-    gc.SetPen(wx.Pen(color, 2))
-    gc.SetBrush(wx.Brush(color))
-    gc.DrawRectangle(2, size/3, size-4, size*2/3-2)
-    gc.DrawRectangle(2, size/3, size/2, size/6)
-    del gc
-    mdc.SelectObject(wx.NullBitmap)
-    return bitmap
+def parse_time(timestr):
+    """時刻文字列を秒に変換する。空欄は None、不正な入力は ValueError。"""
+    timestr = timestr.strip()
+    if not timestr:
+        return None
+    if ':' in timestr:
+        parts = [int(p) for p in timestr.split(':')]
+        if len(parts) == 2:
+            seconds = parts[0] * 60 + parts[1]
+        elif len(parts) == 3:
+            seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+        else:
+            raise ValueError(f"時刻の形式が不正です: {timestr}")
+    else:
+        seconds = int(timestr)
+    if seconds < 0:
+        raise ValueError(f"時刻が負の値です: {timestr}")
+    return seconds
 
 
 class QueueItem:
@@ -117,62 +143,63 @@ class QueueItem:
         self.end_sec = end_sec
         self.status = "waiting"
 
-class DownloadWorker(threading.Thread):
-    def __init__(self, parent, item, config):
-        super().__init__()
-        self.parent = parent
+
+class DownloadWorker(QThread):
+    log = Signal(str)
+    progress = Signal(int, str, str)  # percent, speed, eta
+    phase = Signal(str)
+    item_finished = Signal(object, object)  # item, dest_path or None
+
+    def __init__(self, item, config, ffmpeg_info, parent=None):
+        super().__init__(parent)
         self.item = item
         self.config = config
-        self.daemon = True
+        self.ffmpeg_info = ffmpeg_info
 
     def _progress_hook(self, d):
         if d.get('status') == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate')
             downloaded = d.get('downloaded_bytes', 0)
             percent = int(downloaded / total * 100) if total else 0
-            speed = (d.get('_speed_str') or '').strip()
-            eta = (d.get('_eta_str') or '').strip()
-            wx.CallAfter(self.parent.on_download_progress, percent, speed, eta)
+            self.progress.emit(percent,
+                               (d.get('_speed_str') or '').strip(),
+                               (d.get('_eta_str') or '').strip())
         elif d.get('status') == 'finished':
-            wx.CallAfter(self.parent.on_download_progress, 100, "", "")
+            self.progress.emit(100, "", "")
 
     def run(self):
         try:
             self.item.status = "downloading"
-            wx.CallAfter(self.parent.update_queue_display)
-            wx.CallAfter(self.parent.log, f"処理中: {self.item.url}")
-            output_dir = self.config["output_folder"]
-            fmt = self.config["output_format"]
-            br = self.config["bitrate"]
-            name_template = self.config.get("name_template", "{title}")
-
+            self.log.emit(f"処理中: {self.item.url}")
             data = download_audio(
-                self.item.url, output_dir,
-                output_format=fmt, bitrate=br,
+                self.item.url, self.config["output_folder"],
+                output_format=self.config["output_format"],
+                bitrate=self.config["bitrate"],
                 progress_hook=self._progress_hook,
                 start_sec=self.item.start_sec,
                 end_sec=self.item.end_sec,
-                name_template=name_template
+                name_template=self.config.get("name_template", "{title}"),
             )
-            wx.CallAfter(self.parent.log, "[1/3] ダウンロード完了")
+            self.log.emit("[1/3] ダウンロード完了")
             temp_out = data['temp_raw']
 
-            if self.config["normalize"] and check_ffmpeg(self.parent.ffmpeg_info['path']):
-                wx.CallAfter(self.parent.set_status_label, "音量最適化中...")
-                wx.CallAfter(self.parent.log, "[2/3] 音量最適化中...")
-                normalized = normalize_audio(temp_out, self.config["target_lufs"],
-                                             ffmpeg_info=self.parent.ffmpeg_info)
+            if self.config["normalize"] and check_ffmpeg(self.ffmpeg_info['path']):
+                self.phase.emit("音量最適化中...")
+                self.log.emit("[2/3] 音量最適化中...")
+                normalized = normalize_audio(
+                    temp_out, self.config["target_lufs"],
+                    ffmpeg_info=self.ffmpeg_info)
                 if normalized:
                     temp_out = normalized
-                    wx.CallAfter(self.parent.log, "音量調整完了")
+                    self.log.emit("音量調整完了")
                 else:
-                    wx.CallAfter(self.parent.log, "音量調整に失敗しました。")
+                    self.log.emit("音量調整に失敗しました。")
             else:
-                wx.CallAfter(self.parent.log, "音量正規化をスキップ")
+                self.log.emit("音量正規化をスキップ")
 
             if self.config["embed_metadata"]:
-                wx.CallAfter(self.parent.set_status_label, "メタデータ埋め込み中...")
-                wx.CallAfter(self.parent.log, "[3/3] メタデータ埋め込み中...")
+                self.phase.emit("メタデータ埋め込み中...")
+                self.log.emit("[3/3] メタデータ埋め込み中...")
                 embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
 
             if os.path.exists(data['dest_path']):
@@ -182,310 +209,325 @@ class DownloadWorker(threading.Thread):
             if os.path.exists(data['temp_raw']) and data['temp_raw'] != temp_out:
                 os.remove(data['temp_raw'])
 
-            wx.CallAfter(self.parent.log, f"✨ 完了: {data['dest_path']}")
-            wx.CallAfter(self.parent.on_item_completed, self.item, data['dest_path'])
+            self.log.emit(f"✨ 完了: {data['dest_path']}")
+            self.item_finished.emit(self.item, data['dest_path'])
         except Exception as e:
-            wx.CallAfter(self.parent.log, f"❌ エラー ({self.item.url}): {e}")
-            wx.CallAfter(self.parent.on_item_completed, self.item, None)
+            self.log.emit(f"❌ エラー ({self.item.url}): {e}")
+            self.item_finished.emit(self.item, None)
 
 
-class VibeDLFrame(wx.Frame):
+class FFmpegDownloadThread(QThread):
+    progress = Signal(int, int)
+    done = Signal(object)
+
+    def run(self):
+        path = download_ffmpeg(
+            progress_callback=lambda d, t: self.progress.emit(d, t))
+        self.done.emit(path)
+
+
+def make_card():
+    card = QFrame()
+    card.setObjectName("card")
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setSpacing(10)
+    return card, layout
+
+
+def section_label(text):
+    label = QLabel(text)
+    label.setObjectName("section")
+    return label
+
+
+class VibeDLFrame(QMainWindow):
     def __init__(self):
-        super().__init__(None, title="VibeDL - Audio Downloader", size=(880, 660))
-        self.SetMinSize((760, 560))
+        super().__init__()
+        self.setWindowTitle("VibeDL - Audio Downloader")
+        self.setWindowIcon(make_app_icon())
+        self.resize(900, 680)
+        self.setMinimumSize(780, 580)
+
         self.ffmpeg_info = get_ffmpeg_info()
-        # 設定はレジストリから読み込む（CLI版と共通）。
-        # 以前は起動ごとの初期値で、設定も履歴も保存されなかった。
         self.config = get_config()
-        self.Bind(wx.EVT_CLOSE, self.on_close)
         self.queue = []
         self.active_workers = []
         self.max_workers = 2
         self.last_dest_path = None
-        self.clipboard_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self.on_clipboard_timer, self.clipboard_timer)
-        self.init_ui()
+
+        self._init_ui()
         self.apply_theme()
         self.update_settings_display()
-        self.check_ffmpeg_on_startup()
+
+        self.tray = QSystemTrayIcon(make_app_icon(), self)
+        self.tray.show()
+
+        self.clipboard_timer = QTimer(self)
+        self.clipboard_timer.timeout.connect(self.on_clipboard_timer)
         self.update_clipboard_monitor()
-        self.Centre()
 
-    def init_ui(self):
-        self.panel = wx.Panel(self)
-        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        QTimer.singleShot(100, self.check_ffmpeg_on_startup)
 
-        input_sizer = wx.FlexGridSizer(rows=3, cols=2, vgap=10, hgap=10)
-        input_sizer.AddGrowableCol(1, 1)
+    # ---------- UI構築 ----------
+    def _init_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
 
-        url_label = wx.StaticText(self.panel, label="YouTube URL:")
-        self.url_ctrl = wx.ComboBox(self.panel, style=wx.CB_DROPDOWN | wx.TE_PROCESS_ENTER)
-        self.url_ctrl.SetHint("https://www.youtube.com/...")
-        self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_add_to_queue)
+        header = QHBoxLayout()
+        title = QLabel(f'<span style="color:{ACCENT}">Vibe</span>DL')
+        title.setObjectName("appTitle")
+        header.addWidget(title)
+        subtitle = QLabel("YouTube Audio Downloader")
+        subtitle.setObjectName("muted")
+        header.addWidget(subtitle)
+        header.addStretch()
+        root.addLayout(header)
+
+        # カード1: 入力 + 操作
+        card, card_layout = make_card()
+        card_layout.addWidget(section_label("ダウンロード"))
+
+        url_row = QHBoxLayout()
+        url_row.addWidget(QLabel("YouTube URL:"))
+        self.url_ctrl = QComboBox()
+        self.url_ctrl.setEditable(True)
+        self.url_ctrl.lineEdit().setPlaceholderText("https://www.youtube.com/...")
+        self.url_ctrl.lineEdit().returnPressed.connect(self.on_add_to_queue)
         self._populate_url_history()
-        input_sizer.Add(url_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        input_sizer.Add(self.url_ctrl, 1, wx.EXPAND)
+        url_row.addWidget(self.url_ctrl, 1)
+        card_layout.addLayout(url_row)
 
-        start_label = wx.StaticText(self.panel, label="開始 (秒 / mm:ss):")
-        start_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.start_ctrl = wx.TextCtrl(self.panel, size=(100, -1))
-        self.start_ctrl.SetHint("0:00")
-        start_sizer.Add(self.start_ctrl, 0)
-        start_sizer.AddStretchSpacer()
-        input_sizer.Add(start_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        input_sizer.Add(start_sizer, 1, wx.EXPAND)
+        time_row = QHBoxLayout()
+        time_row.addWidget(QLabel("開始 (秒 / mm:ss):"))
+        self.start_ctrl = QLineEdit()
+        self.start_ctrl.setPlaceholderText("0:00")
+        self.start_ctrl.setFixedWidth(110)
+        time_row.addWidget(self.start_ctrl)
+        time_row.addSpacing(16)
+        time_row.addWidget(QLabel("終了 (秒 / mm:ss):"))
+        self.end_ctrl = QLineEdit()
+        self.end_ctrl.setPlaceholderText("3:00")
+        self.end_ctrl.setFixedWidth(110)
+        time_row.addWidget(self.end_ctrl)
+        time_row.addStretch()
+        card_layout.addLayout(time_row)
 
-        end_label = wx.StaticText(self.panel, label="終了 (秒 / mm:ss):")
-        end_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.end_ctrl = wx.TextCtrl(self.panel, size=(100, -1))
-        self.end_ctrl.SetHint("3:00")
-        end_sizer.Add(self.end_ctrl, 0)
-        end_sizer.AddStretchSpacer()
-        input_sizer.Add(end_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        input_sizer.Add(end_sizer, 1, wx.EXPAND)
+        btn_row = QHBoxLayout()
+        self.add_queue_btn = QPushButton("キューに追加")
+        self.add_queue_btn.clicked.connect(self.on_add_to_queue)
+        btn_row.addWidget(self.add_queue_btn)
+        self.start_queue_btn = QPushButton("キューを開始")
+        self.start_queue_btn.setObjectName("primary")
+        self.start_queue_btn.clicked.connect(self.on_start_queue)
+        self.start_queue_btn.setEnabled(False)
+        btn_row.addWidget(self.start_queue_btn)
+        self.clear_queue_btn = QPushButton("キューをクリア")
+        self.clear_queue_btn.clicked.connect(self.on_clear_queue)
+        btn_row.addWidget(self.clear_queue_btn)
+        btn_row.addStretch()
+        self.open_folder_btn = QPushButton("フォルダを開く")
+        self.open_folder_btn.setToolTip("最後に保存したフォルダを開く")
+        self.open_folder_btn.clicked.connect(self.on_open_folder)
+        self.open_folder_btn.setEnabled(False)
+        btn_row.addWidget(self.open_folder_btn)
+        self.settings_btn = QPushButton("設定")
+        self.settings_btn.clicked.connect(self.on_settings)
+        btn_row.addWidget(self.settings_btn)
+        card_layout.addLayout(btn_row)
+        root.addWidget(card)
 
-        main_sizer.Add(make_section_label(self.panel, "ダウンロード"), 0, wx.LEFT | wx.TOP, 12)
-        main_sizer.Add(input_sizer, 0, wx.EXPAND | wx.ALL, 12)
+        # カード2: キュー + 進捗
+        card2, card2_layout = make_card()
+        card2_layout.addWidget(section_label("キュー"))
+        self.queue_list = QListWidget()
+        self.queue_list.setFixedHeight(110)
+        card2_layout.addWidget(self.queue_list)
+        self.progress = QProgressBar()
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        card2_layout.addWidget(self.progress)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("muted")
+        card2_layout.addWidget(self.status_label)
+        root.addWidget(card2)
 
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # カード3: ログ
+        card3, card3_layout = make_card()
+        card3_layout.addWidget(section_label("ログ"))
+        self.log_ctrl = QPlainTextEdit()
+        self.log_ctrl.setReadOnly(True)
+        card3_layout.addWidget(self.log_ctrl)
+        root.addWidget(card3, 1)
 
-        self.add_queue_btn = wx.Button(self.panel, label="キューに追加", size=(140, 32))
-        self.add_queue_btn.Bind(wx.EVT_BUTTON, self.on_add_to_queue)
-        btn_sizer.Add(self.add_queue_btn, 0, wx.ALIGN_CENTER_VERTICAL)
+        status = self.statusBar()
+        self.status_fmt = QLabel()
+        self.status_norm = QLabel()
+        self.status_meta = QLabel()
+        status.addWidget(self.status_fmt, 2)
+        status.addWidget(self.status_norm, 2)
+        status.addWidget(self.status_meta, 1)
 
-        self.start_queue_btn = wx.Button(self.panel, label="キューを開始", size=(140, 32))
-        self.start_queue_btn.SetBackgroundColour(wx.Colour(0, 150, 0))
-        self.start_queue_btn.SetForegroundColour(wx.Colour(255, 255, 255))
-        self.start_queue_btn.Bind(wx.EVT_BUTTON, self.on_start_queue)
-        self.start_queue_btn.Enable(False)
-        btn_sizer.Add(self.start_queue_btn, 0, wx.LEFT, 10)
+    # ---------- テーマ・表示 ----------
+    def apply_theme(self):
+        dark = self.config.get("dark_mode", False)
+        QApplication.instance().setStyleSheet(build_stylesheet(dark))
 
-        self.clear_queue_btn = wx.Button(self.panel, label="キューをクリア", size=(120, 32))
-        self.clear_queue_btn.Bind(wx.EVT_BUTTON, self.on_clear_queue)
-        btn_sizer.Add(self.clear_queue_btn, 0, wx.LEFT, 10)
+    def update_settings_display(self):
+        self.status_fmt.setText(
+            f"フォーマット: {self.config['output_format']} / {self.config['bitrate']}")
+        self.status_norm.setText(
+            f"正規化: {'ON' if self.config['normalize'] else 'OFF'} ({self.config['target_lufs']} LUFS)")
+        self.status_meta.setText(
+            f"メタデータ: {'ON' if self.config['embed_metadata'] else 'OFF'}")
 
-        btn_sizer.AddStretchSpacer()
+    def log(self, msg):
+        self.log_ctrl.appendPlainText(msg)
 
-        gear_bmp = create_gear_bitmap()
-        folder_bmp = create_folder_bitmap()
+    def on_download_progress(self, percent, speed="", eta=""):
+        self.progress.setValue(percent)
+        parts = []
+        if speed:
+            parts.append(f"速度: {speed}")
+        if eta:
+            parts.append(f"残り: {eta}")
+        if parts:
+            self.status_label.setText("  ".join(parts))
 
-        self.open_folder_btn = wx.BitmapButton(self.panel, bitmap=folder_bmp, size=(32, 32))
-        self.open_folder_btn.SetToolTip("最後に保存したフォルダを開く")
-        self.open_folder_btn.Bind(wx.EVT_BUTTON, self.on_open_folder)
-        self.open_folder_btn.Enable(False)
-        btn_sizer.Add(self.open_folder_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 12)
+    def set_status_label(self, text):
+        self.status_label.setText(text)
 
-        self.settings_btn = wx.BitmapButton(self.panel, bitmap=gear_bmp, size=(32, 32))
-        self.settings_btn.SetToolTip("設定")
-        self.settings_btn.Bind(wx.EVT_BUTTON, self.on_settings)
-        btn_sizer.Add(self.settings_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 12)
+    def notify_user(self, title, message):
+        if self.config.get("notify_sound", True):
+            winsound.MessageBeep(winsound.MB_OK)
+        if self.config.get("notify_toast", True):
+            self.tray.showMessage(title, message, make_app_icon(), 5000)
 
-        main_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
-
-        main_sizer.Add(make_section_label(self.panel, "キュー"), 0, wx.LEFT | wx.BOTTOM, 12)
-        self.queue_list = wx.ListBox(self.panel, size=(-1, 100))
-        main_sizer.Add(self.queue_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
-
-        progress_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.progress = wx.Gauge(self.panel, range=100, style=wx.GA_HORIZONTAL)
-        self.progress.SetValue(0)
-        progress_sizer.Add(self.progress, 1, wx.ALIGN_CENTER_VERTICAL)
-        self.progress_label = wx.StaticText(self.panel, label="", size=(90, -1))
-        progress_sizer.Add(self.progress_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
-        main_sizer.Add(progress_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
-
-        self.status_label = wx.StaticText(self.panel, label="")
-        main_sizer.Add(self.status_label, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 4)
-
-        main_sizer.Add(make_section_label(self.panel, "ログ"), 0, wx.LEFT | wx.TOP, 12)
-        self.log_ctrl = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
-        self.log_ctrl.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        main_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, 12)
-
-        settings_display = wx.BoxSizer(wx.HORIZONTAL)
-        font = wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_LIGHT)
-        self.fmt_text = wx.StaticText(self.panel, label=f"フォーマット: {self.config['output_format']} / {self.config['bitrate']}")
-        self.fmt_text.SetFont(font)
-        settings_display.Add(self.fmt_text, 0, wx.RIGHT, 20)
-        self.norm_text = wx.StaticText(self.panel, label=f"正規化: {'ON' if self.config['normalize'] else 'OFF'} ({self.config['target_lufs']} LUFS)")
-        self.norm_text.SetFont(font)
-        settings_display.Add(self.norm_text, 0, wx.RIGHT, 20)
-        self.meta_text = wx.StaticText(self.panel, label=f"メタデータ: {'ON' if self.config['embed_metadata'] else 'OFF'}")
-        self.meta_text.SetFont(font)
-        settings_display.Add(self.meta_text, 0)
-        main_sizer.Add(settings_display, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 15)
-
-        self.panel.SetSizer(main_sizer)
-
+    # ---------- 履歴・クリップボード ----------
     def _populate_url_history(self):
-        self.url_ctrl.Clear()
-        history = self.config.get("url_history", [])
-        for url in history:
-            self.url_ctrl.Append(url)
+        current = self.url_ctrl.currentText() if self.url_ctrl.count() else ""
+        self.url_ctrl.clear()
+        for url in self.config.get("url_history", []):
+            self.url_ctrl.addItem(url)
+        self.url_ctrl.setCurrentText(current)
 
     def add_to_history(self, url):
         history = self.config.get("url_history", [])
         if url in history:
             history.remove(url)
         history.insert(0, url)
-        if len(history) > 10:
-            history = history[:10]
-        self.config["url_history"] = history
+        self.config["url_history"] = history[:10]
         self._populate_url_history()
         save_config(self.config)
 
-    def on_close(self, event):
-        save_config(self.config)
-        event.Skip()
-
     def update_clipboard_monitor(self):
         if self.config.get("clipboard_monitor", False):
-            self.clipboard_timer.Start(1000)
+            self.clipboard_timer.start(1000)
         else:
-            self.clipboard_timer.Stop()
+            self.clipboard_timer.stop()
 
-    def on_clipboard_timer(self, event):
-        if wx.TheClipboard.IsOpened():
-            return
-        if not wx.TheClipboard.Open():
-            return
-        try:
-            if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_TEXT)):
-                data = wx.TextDataObject()
-                wx.TheClipboard.GetData(data)
-                text = data.GetText().strip()
-                if ("youtube.com/watch" in text or "youtu.be/" in text) and text.startswith("http"):
-                    current = self.url_ctrl.GetValue().strip()
-                    if text != current:
-                        self.url_ctrl.SetValue(text)
-                        self.log("🔗 クリップボードからURLを貼り付けました")
-        except Exception:
-            pass
-        finally:
-            # 例外時も必ず閉じる（開いたままだと他のアプリが使えない）
-            wx.TheClipboard.Close()
+    def on_clipboard_timer(self):
+        text = QApplication.clipboard().text().strip()
+        if ("youtube.com/watch" in text or "youtu.be/" in text) and text.startswith("http"):
+            if text != self.url_ctrl.currentText().strip():
+                self.url_ctrl.setCurrentText(text)
+                self.log("🔗 クリップボードからURLを貼り付けました")
 
-    def apply_theme(self):
-        dark = self.config.get("dark_mode", False)
-        palette = get_palette(dark)
-        apply_theme_recursive(self, dark,
-                              accent_controls=(self.start_queue_btn,))
-        # ログ欄だけ背景を一段暗くする
-        self.log_ctrl.SetBackgroundColour(palette["log_bg"])
-        self.log_ctrl.SetForegroundColour(palette["fg"])
-        self.progress.SetBackgroundColour(palette["bg"])
-        # アイコンもテーマ色で描き直す（以前は薄色背景で固定だった）
-        self.settings_btn.SetBitmap(
-            create_gear_bitmap(24, palette["icon_fg"], palette["btn_bg"]))
-        self.open_folder_btn.SetBitmap(
-            create_folder_bitmap(24, palette["icon_fg"], palette["btn_bg"]))
-        self.Refresh()
-
-    def update_settings_display(self):
-        self.fmt_text.SetLabel(f"フォーマット: {self.config['output_format']} / {self.config['bitrate']}")
-        self.norm_text.SetLabel(f"正規化: {'ON' if self.config['normalize'] else 'OFF'} ({self.config['target_lufs']} LUFS)")
-        self.meta_text.SetLabel(f"メタデータ: {'ON' if self.config['embed_metadata'] else 'OFF'}")
-
-    def log(self, msg):
-        self.log_ctrl.AppendText(msg + "\n")
-
-    def on_download_progress(self, percent, speed="", eta=""):
-        self.progress.SetValue(percent)
-        self.progress_label.SetLabel(f"{percent}%")
-        parts = []
-        if speed:
-            parts.append(f"速度: {speed}")
-        if eta:
-            parts.append(f"残り: {eta}")
-        self.status_label.SetLabel("  ".join(parts))
-
-    def set_status_label(self, text):
-        self.status_label.SetLabel(text)
-
-    def notify_user(self, title, message):
-        if self.config.get("notify_sound", True):
-            winsound.MessageBeep(winsound.MB_OK)
-        if self.config.get("notify_toast", True):
-            notify = wx.adv.NotificationMessage(title=title, message=message, parent=self)
-            notify.Show(timeout=5)
-
+    # ---------- FFmpeg ----------
     def check_ffmpeg_on_startup(self):
-        if not check_ffmpeg(self.ffmpeg_info['path']):
-            dlg = wx.MessageDialog(self,
-                                   "FFmpegが見つかりません。自動ダウンロードしますか？",
-                                   "FFmpeg 未検出",
-                                   wx.YES_NO | wx.ICON_QUESTION)
-            if dlg.ShowModal() == wx.ID_YES:
-                self.log("FFmpegをダウンロード中...")
-                progress_dlg = wx.ProgressDialog("FFmpeg ダウンロード",
-                                                 "ダウンロードしています...",
-                                                 maximum=100, parent=self,
-                                                 style=wx.PD_AUTO_HIDE)
-                def progress_callback(done, total):
-                    percent = int(done / total * 100) if total else 0
-                    wx.CallAfter(progress_dlg.Update, percent, f"{done}/{total} bytes")
-                new_path = download_ffmpeg(progress_callback=progress_callback)
-                progress_dlg.Destroy()
-                if new_path:
-                    self.ffmpeg_info = get_ffmpeg_info()
-                    self.log("FFmpeg の準備が完了しました。")
-                else:
-                    self.log("FFmpeg のダウンロードに失敗しました。")
-            else:
-                self.log("FFmpeg なしで続行します。音量正規化は利用不可。")
-            dlg.Destroy()
+        if check_ffmpeg(self.ffmpeg_info['path']):
+            return
+        answer = QMessageBox.question(
+            self, "FFmpeg 未検出",
+            "FFmpegが見つかりません。自動ダウンロードしますか？")
+        if answer != QMessageBox.Yes:
+            self.log("FFmpeg なしで続行します。音量正規化は利用不可。")
+            return
+        self.log("FFmpegをダウンロード中...")
+        dialog = QProgressDialog("ダウンロードしています...", None, 0, 100, self)
+        dialog.setWindowTitle("FFmpeg ダウンロード")
+        dialog.setCancelButton(None)
+        dialog.setModal(True)
+        thread = FFmpegDownloadThread(self)
 
-    def on_add_to_queue(self, event):
-        url = self.url_ctrl.GetValue().strip()
+        def on_progress(done, total):
+            dialog.setValue(int(done / total * 100) if total else 0)
+            dialog.setLabelText(f"{done}/{total} bytes")
+
+        def on_done(path):
+            dialog.accept()
+            if path:
+                self.ffmpeg_info = get_ffmpeg_info()
+                self.log("FFmpeg の準備が完了しました。")
+            else:
+                self.log("FFmpeg のダウンロードに失敗しました。")
+
+        thread.progress.connect(on_progress)
+        thread.done.connect(on_done)
+        thread.start()
+        dialog.exec()
+        thread.wait()
+
+    # ---------- キュー処理 ----------
+    def on_add_to_queue(self):
+        url = self.url_ctrl.currentText().strip()
         if not url:
-            wx.MessageBox("URLを入力してください。", "入力エラー", wx.OK | wx.ICON_WARNING)
+            QMessageBox.warning(self, "入力エラー", "URLを入力してください。")
             return
         try:
-            start_sec = self.parse_time(self.start_ctrl.GetValue())
-            end_sec = self.parse_time(self.end_ctrl.GetValue())
+            start_sec = parse_time(self.start_ctrl.text())
+            end_sec = parse_time(self.end_ctrl.text())
         except ValueError:
-            wx.MessageBox("開始・終了は「秒」または「mm:ss」で入力してください。",
-                          "入力エラー", wx.OK | wx.ICON_WARNING)
+            QMessageBox.warning(
+                self, "入力エラー",
+                "開始・終了は「秒」または「mm:ss」で入力してください。")
             return
         if start_sec is not None and end_sec is not None and end_sec <= start_sec:
-            wx.MessageBox("終了は開始より後を指定してください。",
-                          "入力エラー", wx.OK | wx.ICON_WARNING)
+            QMessageBox.warning(self, "入力エラー", "終了は開始より後を指定してください。")
             return
         item = QueueItem(url, start_sec, end_sec)
         self.queue.append(item)
         self.update_queue_display()
-        self.url_ctrl.SetValue("")
-        self.start_ctrl.SetValue("")
-        self.end_ctrl.SetValue("")
+        self.url_ctrl.setCurrentText("")
+        self.start_ctrl.clear()
+        self.end_ctrl.clear()
         self.add_to_history(url)
         self.log(f"キューに追加: {url}")
 
     def update_queue_display(self):
-        self.queue_list.Clear()
+        self.queue_list.clear()
+        icons = {"waiting": "⏳", "downloading": "⬇️", "done": "✅"}
         for item in self.queue:
-            status = "⏳" if item.status == "waiting" else "⬇️" if item.status == "downloading" else "✅"
-            self.queue_list.Append(f"{status} {item.url}")
+            self.queue_list.addItem(f"{icons.get(item.status, '')} {item.url}")
         has_waiting = any(item.status == "waiting" for item in self.queue)
-        self.start_queue_btn.Enable(has_waiting)
+        self.start_queue_btn.setEnabled(has_waiting)
 
-    def on_start_queue(self, event):
+    def on_start_queue(self):
         if not self.queue:
-            wx.MessageBox("キューが空です。", "情報", wx.OK | wx.ICON_INFORMATION)
+            QMessageBox.information(self, "情報", "キューが空です。")
             return
         self.start_queue()
 
     def start_queue(self):
         if any(item.status == "waiting" for item in self.queue):
-            self.progress.SetValue(0)
-            self.progress_label.SetLabel("0%")
-            self.status_label.SetLabel("")
+            self.progress.setValue(0)
+            self.status_label.setText("")
         while len(self.active_workers) < self.max_workers:
-            waiting = [item for item in self.queue if item.status == "waiting"]
+            waiting = [i for i in self.queue if i.status == "waiting"]
             if not waiting:
                 break
             item = waiting[0]
-            worker = DownloadWorker(self, item, self.config)
+            item.status = "downloading"
+            worker = DownloadWorker(item, self.config, self.ffmpeg_info, self)
+            worker.log.connect(self.log)
+            worker.progress.connect(self.on_download_progress)
+            worker.phase.connect(self.set_status_label)
+            worker.item_finished.connect(self.on_item_completed)
             self.active_workers.append(worker)
+            self.update_queue_display()
             worker.start()
 
     def on_item_completed(self, item, dest_path):
@@ -493,204 +535,193 @@ class VibeDLFrame(wx.Frame):
             item.status = "done"
             if dest_path:
                 self.last_dest_path = dest_path
-                self.open_folder_btn.Enable(True)
+                self.open_folder_btn.setEnabled(True)
                 self.notify_user("ダウンロード完了", os.path.basename(dest_path))
             self.queue.remove(item)
-        self.active_workers = [w for w in self.active_workers if w.is_alive()]
+        sender = self.sender()
+        if sender in self.active_workers:
+            self.active_workers.remove(sender)
         self.update_queue_display()
-        if self.queue:
+        if any(i.status == "waiting" for i in self.queue):
             self.start_queue()
         elif not self.active_workers:
-            self.progress.SetValue(100)
-            self.progress_label.SetLabel("100%")
-            self.status_label.SetLabel("完了")
+            self.progress.setValue(100)
+            self.status_label.setText("完了")
 
-    def on_clear_queue(self, event):
-        # イテレーション中の remove は要素を飛ばすため、作り直す
-        self.queue = [item for item in self.queue if item.status != "waiting"]
+    def on_clear_queue(self):
+        self.queue = [i for i in self.queue if i.status != "waiting"]
         self.update_queue_display()
         self.log("キューをクリアしました。")
 
-    def parse_time(self, timestr):
-        """時刻文字列を秒に変換する。空欄は None、不正な入力は ValueError。"""
-        timestr = timestr.strip()
-        if not timestr:
-            return None
-        if ':' in timestr:
-            parts = [int(p) for p in timestr.split(':')]
-            if len(parts) == 2:
-                seconds = parts[0] * 60 + parts[1]
-            elif len(parts) == 3:
-                seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
-            else:
-                raise ValueError(f"時刻の形式が不正です: {timestr}")
-        else:
-            seconds = int(timestr)
-        if seconds < 0:
-            raise ValueError(f"時刻が負の値です: {timestr}")
-        return seconds
-
-    def on_open_folder(self, event):
+    # ---------- その他 ----------
+    def on_open_folder(self):
         if self.last_dest_path:
-            folder = os.path.dirname(self.last_dest_path)
-            os.startfile(folder)
+            os.startfile(os.path.dirname(self.last_dest_path))
 
-    def on_settings(self, event):
+    def on_settings(self):
         dlg = SettingsDialog(self, self.config)
-        if dlg.ShowModal() == wx.ID_OK:
-            self.config = dlg.GetConfig()
+        if dlg.exec() == QDialog.Accepted:
+            self.config = dlg.get_config()
             save_config(self.config)
             self.apply_theme()
             self.update_settings_display()
             self.update_clipboard_monitor()
-        dlg.Destroy()
+        else:
+            # ダークモードのプレビューで変わった見た目を元に戻す
+            self.apply_theme()
+
+    def closeEvent(self, event):
+        save_config(self.config)
+        super().closeEvent(event)
 
 
-class SettingsDialog(wx.Dialog):
+class SettingsDialog(QDialog):
     def __init__(self, parent, config):
-        super().__init__(parent, title="設定", size=(480, 520))
-        self.config = config.copy()
-        self.parent = parent
-        self.init_ui()
-        self.apply_theme_to_dialog()
-        self.Centre()
+        super().__init__(parent)
+        self.setWindowTitle("設定")
+        self.resize(480, 520)
+        self.config = dict(config)
+        self.config["url_history"] = list(config.get("url_history", []))
+        self._init_ui()
 
-    def init_ui(self):
-        self.panel = wx.Panel(self)
-        sizer = wx.BoxSizer(wx.VERTICAL)
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
 
-        notebook = wx.Notebook(self.panel)
-        self.notebook = notebook
+        # 出力タブ
+        output_tab = QWidget()
+        out_layout = QVBoxLayout(output_tab)
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("フォーマット:"))
+        self.fmt_combo = QComboBox()
+        self.fmt_combo.addItems(["mp3", "m4a", "wav", "flac"])
+        self.fmt_combo.setCurrentText(self.config["output_format"])
+        fmt_row.addWidget(self.fmt_combo, 1)
+        out_layout.addLayout(fmt_row)
 
-        output_panel = wx.Panel(notebook)
-        output_sizer = wx.BoxSizer(wx.VERTICAL)
-        grid_out = wx.FlexGridSizer(rows=4, cols=2, vgap=10, hgap=10)
-        grid_out.AddGrowableCol(1, 1)
+        br_row = QHBoxLayout()
+        br_row.addWidget(QLabel("ビットレート:"))
+        self.br_combo = QComboBox()
+        self.br_combo.addItems(["128k", "160k", "192k", "256k", "320k"])
+        self.br_combo.setCurrentText(self.config["bitrate"])
+        br_row.addWidget(self.br_combo, 1)
+        out_layout.addLayout(br_row)
 
-        fmt_label = wx.StaticText(output_panel, label="フォーマット:")
-        self.fmt_combo = wx.ComboBox(output_panel, choices=["mp3", "m4a", "wav", "flac"],
-                                     value=self.config["output_format"],
-                                     style=wx.CB_READONLY)
-        grid_out.Add(fmt_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
-        grid_out.Add(self.fmt_combo, 1, wx.EXPAND)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("保存先:"))
+        self.folder_ctrl = QLineEdit(self.config["output_folder"])
+        folder_row.addWidget(self.folder_ctrl, 1)
+        browse_btn = QPushButton("参照")
+        browse_btn.clicked.connect(self.on_browse_folder)
+        folder_row.addWidget(browse_btn)
+        out_layout.addLayout(folder_row)
 
-        br_label = wx.StaticText(output_panel, label="ビットレート:")
-        self.br_combo = wx.ComboBox(output_panel, choices=["128k", "160k", "192k", "256k", "320k"],
-                                    value=self.config["bitrate"],
-                                    style=wx.CB_READONLY)
-        grid_out.Add(br_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
-        grid_out.Add(self.br_combo, 1, wx.EXPAND)
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("ファイル名パターン:"))
+        self.name_template_ctrl = QLineEdit(self.config.get("name_template", "{title}"))
+        self.name_template_ctrl.setPlaceholderText("{title} - {uploader}")
+        name_row.addWidget(self.name_template_ctrl, 1)
+        out_layout.addLayout(name_row)
+        out_layout.addStretch()
+        tabs.addTab(output_tab, "出力")
 
-        folder_label = wx.StaticText(output_panel, label="保存先:")
-        folder_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.folder_ctrl = wx.TextCtrl(output_panel, value=self.config["output_folder"])
-        folder_sizer.Add(self.folder_ctrl, 1, wx.EXPAND)
-        browse_btn = wx.Button(output_panel, label="参照")
-        browse_btn.Bind(wx.EVT_BUTTON, self.on_browse_folder)
-        folder_sizer.Add(browse_btn, 0, wx.LEFT, 5)
-        grid_out.Add(folder_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
-        grid_out.Add(folder_sizer, 1, wx.EXPAND)
+        # 処理タブ
+        proc_tab = QWidget()
+        proc_layout = QVBoxLayout(proc_tab)
+        self.normalize_cb = QCheckBox("音量正規化")
+        self.normalize_cb.setChecked(self.config["normalize"])
+        self.normalize_cb.toggled.connect(self.on_normalize_toggle)
+        proc_layout.addWidget(self.normalize_cb)
+        lufs_row = QHBoxLayout()
+        lufs_row.addWidget(QLabel("目標 LUFS:"))
+        self.lufs_spin = QDoubleSpinBox()
+        self.lufs_spin.setRange(-70.0, 0.0)
+        self.lufs_spin.setSingleStep(0.5)
+        self.lufs_spin.setDecimals(1)
+        self.lufs_spin.setValue(self.config["target_lufs"])
+        lufs_row.addWidget(self.lufs_spin)
+        lufs_row.addStretch()
+        proc_layout.addLayout(lufs_row)
+        self.meta_cb = QCheckBox("メタデータ埋め込み")
+        self.meta_cb.setChecked(self.config["embed_metadata"])
+        proc_layout.addWidget(self.meta_cb)
+        proc_layout.addStretch()
+        self.on_normalize_toggle()
+        tabs.addTab(proc_tab, "処理")
 
-        name_label = wx.StaticText(output_panel, label="ファイル名パターン:")
-        self.name_template_ctrl = wx.TextCtrl(output_panel, value=self.config.get("name_template", "{title}"))
-        self.name_template_ctrl.SetHint("{title} - {uploader}")
-        grid_out.Add(name_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
-        grid_out.Add(self.name_template_ctrl, 1, wx.EXPAND)
+        # 通知タブ
+        notif_tab = QWidget()
+        notif_layout = QVBoxLayout(notif_tab)
+        self.sound_cb = QCheckBox("完了時に通知音を鳴らす")
+        self.sound_cb.setChecked(self.config.get("notify_sound", True))
+        notif_layout.addWidget(self.sound_cb)
+        self.toast_cb = QCheckBox("完了時にトースト通知を表示")
+        self.toast_cb.setChecked(self.config.get("notify_toast", True))
+        notif_layout.addWidget(self.toast_cb)
+        notif_layout.addStretch()
+        tabs.addTab(notif_tab, "通知")
 
-        output_sizer.Add(grid_out, 0, wx.EXPAND | wx.ALL, 15)
-        output_panel.SetSizer(output_sizer)
-        notebook.AddPage(output_panel, "出力")
+        # 一般タブ
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+        self.dark_cb = QCheckBox("ダークモード")
+        self.dark_cb.setChecked(self.config.get("dark_mode", False))
+        self.dark_cb.toggled.connect(self.on_dark_toggle)
+        general_layout.addWidget(self.dark_cb)
+        self.clipboard_cb = QCheckBox("クリップボードを監視してURLを自動入力")
+        self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
+        general_layout.addWidget(self.clipboard_cb)
+        general_layout.addStretch()
+        tabs.addTab(general_tab, "一般")
 
-        proc_panel = wx.Panel(notebook)
-        proc_sizer = wx.BoxSizer(wx.VERTICAL)
+        layout.addWidget(tabs)
 
-        self.normalize_cb = wx.CheckBox(proc_panel, label="音量正規化")
-        self.normalize_cb.SetValue(self.config["normalize"])
-        self.normalize_cb.Bind(wx.EVT_CHECKBOX, self.on_normalize_toggle)
-        proc_sizer.Add(self.normalize_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 15)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.setObjectName("primary")
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+        cancel_btn = QPushButton("キャンセル")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
 
-        lufs_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        lufs_sizer.Add(wx.StaticText(proc_panel, label="目標 LUFS:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.lufs_spin = wx.SpinCtrlDouble(proc_panel, min=-70.0, max=0.0, initial=self.config["target_lufs"], inc=0.1)
-        self.lufs_spin.SetDigits(1)
-        lufs_sizer.Add(self.lufs_spin, 0)
-        proc_sizer.Add(lufs_sizer, 0, wx.LEFT | wx.RIGHT, 15)
+    def on_normalize_toggle(self):
+        self.lufs_spin.setEnabled(self.normalize_cb.isChecked())
 
-        self.meta_cb = wx.CheckBox(proc_panel, label="メタデータ埋め込み")
-        self.meta_cb.SetValue(self.config["embed_metadata"])
-        proc_sizer.Add(self.meta_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
+    def on_dark_toggle(self, checked):
+        # 設定ダイアログとメイン画面へ即時プレビュー
+        QApplication.instance().setStyleSheet(build_stylesheet(checked))
 
-        self.on_normalize_toggle(None)
-        proc_panel.SetSizer(proc_sizer)
-        notebook.AddPage(proc_panel, "処理")
+    def on_browse_folder(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "フォルダを選択", self.folder_ctrl.text())
+        if path:
+            self.folder_ctrl.setText(path)
 
-        notif_panel = wx.Panel(notebook)
-        notif_sizer = wx.BoxSizer(wx.VERTICAL)
-        self.sound_cb = wx.CheckBox(notif_panel, label="完了時に通知音を鳴らす")
-        self.sound_cb.SetValue(self.config.get("notify_sound", True))
-        notif_sizer.Add(self.sound_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 15)
-        self.toast_cb = wx.CheckBox(notif_panel, label="完了時にトースト通知を表示")
-        self.toast_cb.SetValue(self.config.get("notify_toast", True))
-        notif_sizer.Add(self.toast_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
-        notif_panel.SetSizer(notif_sizer)
-        notebook.AddPage(notif_panel, "通知")
-
-        general_panel = wx.Panel(notebook)
-        general_sizer = wx.BoxSizer(wx.VERTICAL)
-        self.dark_cb = wx.CheckBox(general_panel, label="ダークモード")
-        self.dark_cb.SetValue(self.config.get("dark_mode", False))
-        self.dark_cb.Bind(wx.EVT_CHECKBOX, self.on_dark_toggle)
-        general_sizer.Add(self.dark_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 15)
-        self.clipboard_cb = wx.CheckBox(general_panel, label="クリップボードを監視してURLを自動入力")
-        self.clipboard_cb.SetValue(self.config.get("clipboard_monitor", False))
-        general_sizer.Add(self.clipboard_cb, 0, wx.LEFT | wx.RIGHT | wx.TOP, 10)
-        general_panel.SetSizer(general_sizer)
-        notebook.AddPage(general_panel, "一般")
-
-        sizer.Add(notebook, 1, wx.EXPAND | wx.ALL, 10)
-
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        ok_btn = wx.Button(self.panel, wx.ID_OK, "OK")
-        cancel_btn = wx.Button(self.panel, wx.ID_CANCEL, "キャンセル")
-        btn_sizer.Add(ok_btn, 0, wx.RIGHT, 5)
-        btn_sizer.Add(cancel_btn, 0)
-        sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 15)
-
-        self.panel.SetSizer(sizer)
-
-    def apply_theme_to_dialog(self):
-        # メイン画面と共通の再帰テーマ適用を使う
-        apply_theme_recursive(self, self.dark_cb.GetValue())
-
-    def on_normalize_toggle(self, event):
-        self.lufs_spin.Enable(self.normalize_cb.GetValue())
-
-    def on_dark_toggle(self, event):
-        self.apply_theme_to_dialog()
-
-    def on_browse_folder(self, event):
-        dlg = wx.DirDialog(self, "フォルダを選択", defaultPath=self.config["output_folder"])
-        if dlg.ShowModal() == wx.ID_OK:
-            self.folder_ctrl.SetValue(dlg.GetPath())
-        dlg.Destroy()
-
-    def GetConfig(self):
-        self.config["output_format"] = self.fmt_combo.GetValue()
-        self.config["bitrate"] = self.br_combo.GetValue()
-        self.config["output_folder"] = self.folder_ctrl.GetValue()
-        self.config["target_lufs"] = self.lufs_spin.GetValue()
-        self.config["normalize"] = self.normalize_cb.GetValue()
-        self.config["embed_metadata"] = self.meta_cb.GetValue()
-        self.config["dark_mode"] = self.dark_cb.GetValue()
-        self.config["notify_sound"] = self.sound_cb.GetValue()
-        self.config["notify_toast"] = self.toast_cb.GetValue()
-        self.config["clipboard_monitor"] = self.clipboard_cb.GetValue()
-        self.config["name_template"] = self.name_template_ctrl.GetValue().strip() or "{title}"
+    def get_config(self):
+        self.config["output_format"] = self.fmt_combo.currentText()
+        self.config["bitrate"] = self.br_combo.currentText()
+        self.config["output_folder"] = self.folder_ctrl.text()
+        self.config["target_lufs"] = self.lufs_spin.value()
+        self.config["normalize"] = self.normalize_cb.isChecked()
+        self.config["embed_metadata"] = self.meta_cb.isChecked()
+        self.config["dark_mode"] = self.dark_cb.isChecked()
+        self.config["notify_sound"] = self.sound_cb.isChecked()
+        self.config["notify_toast"] = self.toast_cb.isChecked()
+        self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
+        self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
 
 
+def main():
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
+    window = VibeDLFrame()
+    window.show()
+    sys.exit(app.exec())
+
+
 if __name__ == "__main__":
-    app = wx.App()
-    frame = VibeDLFrame()
-    frame.Show()
-    app.MainLoop()
+    main()
