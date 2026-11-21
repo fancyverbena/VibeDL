@@ -146,6 +146,35 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
             else:
                 raise e
 
+def search_youtube(keyword, max_results=10):
+    """キーワードでYouTubeを検索し、候補のリストを返す（ダウンロードはしない）。"""
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'skip_download': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(f"ytsearch{max_results}:{keyword}", download=False)
+    results = []
+    for entry in info.get('entries') or []:
+        if not entry:
+            continue
+        video_id = entry.get('id')
+        if video_id:
+            url = f"https://www.youtube.com/watch?v={video_id}"
+        else:
+            url = entry.get('url') or ''
+            if not url.startswith('http'):
+                continue
+        results.append({
+            'url': url,
+            'title': entry.get('title') or 'Unknown',
+            'uploader': entry.get('uploader') or entry.get('channel') or '',
+            'duration': entry.get('duration'),
+        })
+    return results
+
 def download_playlist(playlist_url, config, progress_hook=None):
     output_dir = os.path.abspath(config['output_folder'])
     ydl_opts = {
