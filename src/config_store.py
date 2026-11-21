@@ -19,6 +19,10 @@ DEFAULT_CONFIG = {
     "name_template": "{title}",
     "cookies_browser": "",
     "cookies_file": "",
+    "trim_silence": False,
+    "fade_enabled": False,
+    "fade_seconds": 1.0,
+    "language": "ja",
 }
 
 # config key -> (registry value name, kind)
@@ -36,6 +40,10 @@ _KEY_MAP = {
     "name_template": ("NameTemplate", "str"),
     "cookies_browser": ("CookiesBrowser", "str"),
     "cookies_file": ("CookiesFile", "str"),
+    "trim_silence": ("TrimSilence", "bool"),
+    "fade_enabled": ("FadeEnabled", "bool"),
+    "fade_seconds": ("FadeSeconds", "float"),
+    "language": ("Language", "str"),
 }
 
 

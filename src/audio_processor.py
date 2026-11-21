@@ -140,6 +140,47 @@ def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None):
             os.remove(output_path)
         return None
 
+def trim_and_fade(input_path, trim_silence=False, fade_sec=0.0, ffmpeg_info=None):
+    """先頭・末尾の無音トリミングとフェードイン／アウトを1パスで適用する。
+
+    末尾側は areverse で反転してから同じ処理を行い、再反転することで
+    長さを取得せずに処理できる。成功時は出力パス、不要／失敗時は None。
+    """
+    if not trim_silence and fade_sec <= 0:
+        return None
+    if ffmpeg_info is None:
+        ffmpeg_info = get_ffmpeg_info()
+
+    ffmpeg_bin = ffmpeg_info['path']
+    base, ext = os.path.splitext(input_path)
+    output_path = f"{base}_trim{ext}"
+
+    filters = []
+    if trim_silence:
+        filters.append("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.2")
+    if fade_sec > 0:
+        filters.append(f"afade=t=in:st=0:d={fade_sec}")
+    filters.append("areverse")
+    if trim_silence:
+        filters.append("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.2")
+    if fade_sec > 0:
+        filters.append(f"afade=t=in:st=0:d={fade_sec}")
+    filters.append("areverse")
+
+    cmd = [
+        ffmpeg_bin, '-y', '-i', input_path,
+        '-af', ','.join(filters),
+        '-q:a', '2',
+        output_path
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return output_path
+    except subprocess.CalledProcessError:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
+
 def embed_metadata(file_path, title, artist, thumb_url):
     ext = os.path.splitext(file_path)[1].lower()
 
