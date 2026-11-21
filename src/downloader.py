@@ -83,6 +83,11 @@ def is_cookie_error(exc):
         "database", "lock",
     ))
 
+# YouTubeの署名/nチャレンジ解決にはJSランタイムが必要。未導入だと
+# 「Only images are available」となり実フォーマットが一切取れない。
+# 既定の Deno に加えて、導入済みの人が多い Node も許可する。
+JS_RUNTIMES = {'deno': {}, 'node': {}}
+
 def _cookie_opts(cookies_browser=None, cookies_file=None):
     """yt-dlp用のCookieオプションを返す。ファイル指定が優先。"""
     if cookies_file:
@@ -130,6 +135,7 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         'postprocessors': postprocessors,
         'postprocessor_args': [],
         **_cookie_opts(cookies_browser, cookies_file),
+        'js_runtimes': JS_RUNTIMES,
     }
 
     # 自動ダウンロード／同梱された FFmpeg を yt-dlp の変換にも使う。
@@ -270,6 +276,7 @@ def get_video_info(url, cookies_browser=None, cookies_file=None):
         'no_warnings': True,
         'skip_download': True,
         **_cookie_opts(cookies_browser, cookies_file),
+        'js_runtimes': JS_RUNTIMES,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
