@@ -25,12 +25,148 @@ from downloader import (
     download_audio, search_youtube, get_playlist_entries, get_video_info,
 )
 from audio_processor import (
-    normalize_audio, embed_metadata,
+    normalize_audio, embed_metadata, trim_and_fade,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
 )
 from config_store import (
     get_config, save_config, load_download_history, save_download_history,
 )
+
+CURRENT_LANG = "ja"
+
+TEXTS = {
+    "log_processing": {"ja": "処理中: {url}", "en": "Processing: {url}"},
+    "log_dl_done": {"ja": "[1/3] ダウンロード完了", "en": "[1/3] Download complete"},
+    "phase_trim": {"ja": "無音トリミング／フェード処理中...", "en": "Trimming silence / applying fades..."},
+    "log_trim": {"ja": "無音トリミング／フェード処理中...", "en": "Trimming silence / applying fades..."},
+    "log_trim_done": {"ja": "トリミング／フェード完了", "en": "Trim/fade complete"},
+    "log_trim_failed": {"ja": "トリミング／フェードに失敗しました。", "en": "Trim/fade failed."},
+    "phase_normalize": {"ja": "音量最適化中...", "en": "Normalizing volume..."},
+    "log_normalize": {"ja": "[2/3] 音量最適化中...", "en": "[2/3] Normalizing volume..."},
+    "log_normalize_done": {"ja": "音量調整完了", "en": "Volume normalization complete"},
+    "log_normalize_failed": {"ja": "音量調整に失敗しました。", "en": "Volume normalization failed."},
+    "log_normalize_skip": {"ja": "音量正規化をスキップ", "en": "Skipping volume normalization"},
+    "phase_metadata": {"ja": "メタデータ埋め込み中...", "en": "Embedding metadata..."},
+    "log_metadata": {"ja": "[3/3] メタデータ埋め込み中...", "en": "[3/3] Embedding metadata..."},
+    "log_complete": {"ja": "✨ 完了: {path}", "en": "✨ Done: {path}"},
+    "log_error": {"ja": "❌ エラー ({url}): {err}", "en": "❌ Error ({url}): {err}"},
+    "log_cancelled": {"ja": "⏹ キャンセルしました: {url}", "en": "⏹ Cancelled: {url}"},
+    "section_download": {"ja": "ダウンロード", "en": "Download"},
+    "search": {"ja": "検索", "en": "Search"},
+    "search_tip": {"ja": "キーワードでYouTubeを検索", "en": "Search YouTube by keyword"},
+    "start_label": {"ja": "開始 (秒 / mm:ss):", "en": "Start (sec / mm:ss):"},
+    "end_label": {"ja": "終了 (秒 / mm:ss):", "en": "End (sec / mm:ss):"},
+    "add_queue": {"ja": "キューに追加", "en": "Add to Queue"},
+    "start_queue": {"ja": "キューを開始", "en": "Start Queue"},
+    "clear_queue": {"ja": "キューをクリア", "en": "Clear Queue"},
+    "cancel": {"ja": "キャンセル", "en": "Cancel"},
+    "cancel_tip": {"ja": "実行中のダウンロードをすべてキャンセル", "en": "Cancel all running downloads"},
+    "import_btn": {"ja": "インポート", "en": "Import"},
+    "import_tip": {"ja": "テキストファイル（1行1URL）からキューに追加", "en": "Add from a text file (one URL per line)"},
+    "open_folder": {"ja": "フォルダを開く", "en": "Open Folder"},
+    "open_folder_tip": {"ja": "最後に保存したフォルダを開く", "en": "Open the folder of the last saved file"},
+    "play": {"ja": "▶ 再生", "en": "▶ Play"},
+    "play_tip": {"ja": "最後に完了したファイルを再生", "en": "Play the last completed file"},
+    "history": {"ja": "履歴", "en": "History"},
+    "history_tip": {"ja": "ダウンロード履歴", "en": "Download history"},
+    "settings": {"ja": "設定", "en": "Settings"},
+    "section_queue": {"ja": "キュー", "en": "Queue"},
+    "section_log": {"ja": "ログ", "en": "Log"},
+    "status_format": {"ja": "フォーマット: {fmt} / {br}", "en": "Format: {fmt} / {br}"},
+    "status_normalize": {"ja": "正規化: {onoff} ({lufs} LUFS)", "en": "Normalize: {onoff} ({lufs} LUFS)"},
+    "status_metadata": {"ja": "メタデータ: {onoff}", "en": "Metadata: {onoff}"},
+    "speed": {"ja": "速度: {speed}", "en": "Speed: {speed}"},
+    "eta": {"ja": "残り: {eta}", "en": "ETA: {eta}"},
+    "clipboard_pasted": {"ja": "🔗 クリップボードからURLを貼り付けました", "en": "🔗 Pasted URL from clipboard"},
+    "ffmpeg_not_found_title": {"ja": "FFmpeg 未検出", "en": "FFmpeg Not Found"},
+    "ffmpeg_not_found_msg": {"ja": "FFmpegが見つかりません。自動ダウンロードしますか？", "en": "FFmpeg was not found. Download it automatically?"},
+    "ffmpeg_without": {"ja": "FFmpeg なしで続行します。音量正規化は利用不可。", "en": "Continuing without FFmpeg. Volume normalization is unavailable."},
+    "ffmpeg_downloading": {"ja": "FFmpegをダウンロード中...", "en": "Downloading FFmpeg..."},
+    "ffmpeg_dialog": {"ja": "ダウンロードしています...", "en": "Downloading..."},
+    "ffmpeg_dialog_title": {"ja": "FFmpeg ダウンロード", "en": "FFmpeg Download"},
+    "ffmpeg_ready": {"ja": "FFmpeg の準備が完了しました。", "en": "FFmpeg is ready."},
+    "ffmpeg_failed": {"ja": "FFmpeg のダウンロードに失敗しました。", "en": "Failed to download FFmpeg."},
+    "input_error": {"ja": "入力エラー", "en": "Input Error"},
+    "time_format_msg": {"ja": "開始・終了は「秒」または「mm:ss」で入力してください。", "en": "Enter start/end as seconds or mm:ss."},
+    "end_after_start_msg": {"ja": "終了は開始より後を指定してください。", "en": "End must be after start."},
+    "added_to_queue": {"ja": "キューに追加: {name}", "en": "Added to queue: {name}"},
+    "playlist_expanding": {"ja": "プレイリストを展開中...", "en": "Expanding playlist..."},
+    "playlist_empty": {"ja": "プレイリストに動画が見つかりませんでした", "en": "No videos found in the playlist"},
+    "playlist_added": {"ja": "プレイリストから{n}件追加しました", "en": "Added {n} items from playlist"},
+    "playlist_failed": {"ja": "プレイリストの展開に失敗しました: {msg}", "en": "Failed to expand playlist: {msg}"},
+    "url_required": {"ja": "URLを入力してください。", "en": "Please enter a URL."},
+    "info_title": {"ja": "情報", "en": "Info"},
+    "queue_empty": {"ja": "キューが空です。", "en": "The queue is empty."},
+    "cancel_requested": {"ja": "キャンセルを要求しました（ダウンロード中はすぐ、変換・音量調整中は工程の合間で止まります）", "en": "Cancellation requested (immediate while downloading; at phase boundaries during conversion/normalization)"},
+    "status_cancelled": {"ja": "キャンセルしました", "en": "Cancelled"},
+    "notify_complete": {"ja": "ダウンロード完了", "en": "Download complete"},
+    "status_done": {"ja": "完了", "en": "Done"},
+    "queue_cleared": {"ja": "キューをクリアしました。", "en": "Queue cleared."},
+    "file_read_failed": {"ja": "ファイルの読み込みに失敗しました: {err}", "en": "Failed to read file: {err}"},
+    "import_dialog_title": {"ja": "URLリストを選択", "en": "Select URL List"},
+    "filter_text": {"ja": "テキストファイル (*.txt);;すべてのファイル (*.*)", "en": "Text files (*.txt);;All files (*.*)"},
+    "error_title": {"ja": "エラー", "en": "Error"},
+    "file_unreadable": {"ja": "ファイルを読み込めませんでした: {err}", "en": "Could not read the file: {err}"},
+    "no_urls": {"ja": "URLが見つかりませんでした", "en": "No URLs found"},
+    "urls_loaded": {"ja": "{n}件のURLを読み込みました", "en": "Loaded {n} URLs"},
+    "search_title": {"ja": "YouTube検索", "en": "YouTube Search"},
+    "keyword_placeholder": {"ja": "キーワードを入力", "en": "Enter keywords"},
+    "search_status_initial": {"ja": "キーワードを入力して検索してください（最大10件）", "en": "Enter keywords to search (up to 10 results)"},
+    "add_selected": {"ja": "選択をキューに追加", "en": "Add Selected to Queue"},
+    "close": {"ja": "閉じる", "en": "Close"},
+    "searching": {"ja": "検索中...", "en": "Searching..."},
+    "results_found": {"ja": "{n}件見つかりました。複数選択もできます", "en": "Found {n} results. Multiple selection is supported"},
+    "no_results": {"ja": "見つかりませんでした", "en": "No results found"},
+    "search_failed": {"ja": "検索に失敗しました: {msg}", "en": "Search failed: {msg}"},
+    "select_result": {"ja": "結果を選択してください。", "en": "Please select a result."},
+    "history_title": {"ja": "ダウンロード履歴", "en": "Download History"},
+    "missing_file_suffix": {"ja": "（ファイルなし）", "en": " (file missing)"},
+    "history_empty": {"ja": "履歴はまだありません", "en": "No history yet"},
+    "play2": {"ja": "再生", "en": "Play"},
+    "redownload": {"ja": "再ダウンロード", "en": "Re-download"},
+    "file_not_found": {"ja": "ファイルが見つかりません。", "en": "File not found."},
+    "settings_title": {"ja": "設定", "en": "Settings"},
+    "format_label": {"ja": "フォーマット:", "en": "Format:"},
+    "bitrate_label": {"ja": "ビットレート:", "en": "Bitrate:"},
+    "folder_label": {"ja": "保存先:", "en": "Output folder:"},
+    "browse": {"ja": "参照", "en": "Browse"},
+    "name_pattern_label": {"ja": "ファイル名パターン:", "en": "Filename pattern:"},
+    "tab_output": {"ja": "出力", "en": "Output"},
+    "normalize_cb": {"ja": "音量正規化", "en": "Volume normalization"},
+    "lufs_label": {"ja": "目標 LUFS:", "en": "Target LUFS:"},
+    "meta_cb": {"ja": "メタデータ埋め込み", "en": "Embed metadata"},
+    "tab_processing": {"ja": "処理", "en": "Processing"},
+    "trim_cb": {"ja": "無音トリミング（先頭・末尾）", "en": "Trim silence (start/end)"},
+    "fade_cb": {"ja": "フェードイン／アウト", "en": "Fade in / out"},
+    "fade_sec_label": {"ja": "フェード時間（秒）:", "en": "Fade duration (sec):"},
+    "sound_cb": {"ja": "完了時に通知音を鳴らす", "en": "Play a sound when finished"},
+    "toast_cb": {"ja": "完了時にトースト通知を表示", "en": "Show a toast notification when finished"},
+    "tab_notif": {"ja": "通知", "en": "Notifications"},
+    "dark_cb": {"ja": "ダークモード", "en": "Dark mode"},
+    "clipboard_cb": {"ja": "クリップボードを監視してURLを自動入力", "en": "Monitor clipboard and auto-fill URLs"},
+    "cookies_label": {"ja": "ブラウザCookie（年齢制限など用）", "en": "Browser cookies (for age-restricted videos)"},
+    "cookies_none": {"ja": "使用しない", "en": "None"},
+    "cookies_file_label": {"ja": "cookies.txt（指定時は優先）", "en": "cookies.txt (takes precedence)"},
+    "cookies_file_ph": {"ja": "cookies.txt のパス（任意）", "en": "Path to cookies.txt (optional)"},
+    "select": {"ja": "選択", "en": "Select"},
+    "tab_general": {"ja": "一般", "en": "General"},
+    "language_label": {"ja": "言語", "en": "Language"},
+    "language_note": {"ja": "※言語の変更は再起動後に反映されます", "en": "Language changes apply after restarting the app."},
+    "folder_dialog": {"ja": "フォルダを選択", "en": "Select Folder"},
+    "cookies_dialog": {"ja": "cookies.txt を選択", "en": "Select cookies.txt"},
+}
+
+
+def set_language(lang):
+    global CURRENT_LANG
+    CURRENT_LANG = lang if lang in ("ja", "en") else "ja"
+
+
+def tr(key, **kwargs):
+    entry = TEXTS.get(key, {})
+    text = entry.get(CURRENT_LANG) or entry.get("ja") or key
+    return text.format(**kwargs) if kwargs else text
+
 
 ACCENT = "#7C5CFF"
 
@@ -197,7 +333,7 @@ class DownloadWorker(QThread):
     def run(self):
         try:
             self.item.status = "downloading"
-            self.log.emit(f"処理中: {self.item.url}")
+            self.log.emit(tr("log_processing", url=self.item.url))
             data = download_audio(
                 self.item.url, self.config["output_folder"],
                 output_format=self.config["output_format"],
@@ -209,28 +345,45 @@ class DownloadWorker(QThread):
                 cookies_browser=self.config.get("cookies_browser") or None,
                 cookies_file=self.config.get("cookies_file") or None,
             )
-            self.log.emit("[1/3] ダウンロード完了")
+            self.log.emit(tr("log_dl_done"))
             temp_out = data['temp_raw']
 
             self._check_cancelled()
+            if (self.config.get("trim_silence") or self.config.get("fade_enabled")) \
+                    and check_ffmpeg(self.ffmpeg_info['path']):
+                self.phase.emit(tr("phase_trim"))
+                self.log.emit(tr("log_trim"))
+                fade_sec = float(self.config.get("fade_seconds", 1.0)) \
+                    if self.config.get("fade_enabled") else 0.0
+                trimmed = trim_and_fade(
+                    temp_out,
+                    trim_silence=bool(self.config.get("trim_silence")),
+                    fade_sec=fade_sec,
+                    ffmpeg_info=self.ffmpeg_info)
+                if trimmed:
+                    temp_out = trimmed
+                    self.log.emit(tr("log_trim_done"))
+                else:
+                    self.log.emit(tr("log_trim_failed"))
+
             if self.config["normalize"] and check_ffmpeg(self.ffmpeg_info['path']):
-                self.phase.emit("音量最適化中...")
-                self.log.emit("[2/3] 音量最適化中...")
+                self.phase.emit(tr("phase_normalize"))
+                self.log.emit(tr("log_normalize"))
                 normalized = normalize_audio(
                     temp_out, self.config["target_lufs"],
                     ffmpeg_info=self.ffmpeg_info)
                 if normalized:
                     temp_out = normalized
-                    self.log.emit("音量調整完了")
+                    self.log.emit(tr("log_normalize_done"))
                 else:
-                    self.log.emit("音量調整に失敗しました。")
+                    self.log.emit(tr("log_normalize_failed"))
             else:
-                self.log.emit("音量正規化をスキップ")
+                self.log.emit(tr("log_normalize_skip"))
 
             self._check_cancelled()
             if self.config["embed_metadata"]:
-                self.phase.emit("メタデータ埋め込み中...")
-                self.log.emit("[3/3] メタデータ埋め込み中...")
+                self.phase.emit(tr("phase_metadata"))
+                self.log.emit(tr("log_metadata"))
                 embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
 
             if os.path.exists(data['dest_path']):
@@ -240,7 +393,7 @@ class DownloadWorker(QThread):
             if os.path.exists(data['temp_raw']) and data['temp_raw'] != temp_out:
                 os.remove(data['temp_raw'])
 
-            self.log.emit(f"✨ 完了: {data['dest_path']}")
+            self.log.emit(tr("log_complete", path=data['dest_path']))
             self.item_finished.emit(self.item, data['dest_path'])
         except DownloadCancelled:
             self._handle_cancelled(data if 'data' in locals() else None,
@@ -252,7 +405,7 @@ class DownloadWorker(QThread):
                 self._handle_cancelled(data if 'data' in locals() else None,
                                        temp_out if 'temp_out' in locals() else None)
             else:
-                self.log.emit(f"❌ エラー ({self.item.url}): {e}")
+                self.log.emit(tr("log_error", url=self.item.url, err=e))
                 self.item_finished.emit(self.item, None)
 
     def _handle_cancelled(self, data, temp_out):
@@ -269,7 +422,7 @@ class DownloadWorker(QThread):
                     os.remove(path)
                 except OSError:
                     pass
-        self.log.emit(f"⏹ キャンセルしました: {self.item.url}")
+        self.log.emit(tr("log_cancelled", url=self.item.url))
         self.item_cancelled.emit(self.item)
 
 
@@ -390,6 +543,7 @@ class VibeDLFrame(QMainWindow):
 
         self.ffmpeg_info = get_ffmpeg_info()
         self.config = get_config()
+        set_language(self.config.get("language", "ja"))
         self.queue = []
         self.active_workers = []
         self.max_workers = 2
@@ -431,7 +585,7 @@ class VibeDLFrame(QMainWindow):
 
         # カード1: 入力 + 操作
         card, card_layout = make_card()
-        card_layout.addWidget(section_label("ダウンロード"))
+        card_layout.addWidget(section_label(tr("section_download")))
 
         url_row = QHBoxLayout()
         url_row.addWidget(QLabel("YouTube URL:"))
@@ -441,20 +595,20 @@ class VibeDLFrame(QMainWindow):
         self.url_ctrl.lineEdit().returnPressed.connect(self.on_add_to_queue)
         self._populate_url_history()
         url_row.addWidget(self.url_ctrl, 1)
-        self.search_btn = QPushButton("検索")
-        self.search_btn.setToolTip("キーワードでYouTubeを検索")
+        self.search_btn = QPushButton(tr("search"))
+        self.search_btn.setToolTip(tr("search_tip"))
         self.search_btn.clicked.connect(self.on_search)
         url_row.addWidget(self.search_btn)
         card_layout.addLayout(url_row)
 
         time_row = QHBoxLayout()
-        time_row.addWidget(QLabel("開始 (秒 / mm:ss):"))
+        time_row.addWidget(QLabel(tr("start_label")))
         self.start_ctrl = QLineEdit()
         self.start_ctrl.setPlaceholderText("0:00")
         self.start_ctrl.setFixedWidth(110)
         time_row.addWidget(self.start_ctrl)
         time_row.addSpacing(16)
-        time_row.addWidget(QLabel("終了 (秒 / mm:ss):"))
+        time_row.addWidget(QLabel(tr("end_label")))
         self.end_ctrl = QLineEdit()
         self.end_ctrl.setPlaceholderText("3:00")
         self.end_ctrl.setFixedWidth(110)
@@ -463,42 +617,42 @@ class VibeDLFrame(QMainWindow):
         card_layout.addLayout(time_row)
 
         btn_row = QHBoxLayout()
-        self.add_queue_btn = QPushButton("キューに追加")
+        self.add_queue_btn = QPushButton(tr("add_queue"))
         self.add_queue_btn.clicked.connect(self.on_add_to_queue)
         btn_row.addWidget(self.add_queue_btn)
-        self.start_queue_btn = QPushButton("キューを開始")
+        self.start_queue_btn = QPushButton(tr("start_queue"))
         self.start_queue_btn.setObjectName("primary")
         self.start_queue_btn.clicked.connect(self.on_start_queue)
         self.start_queue_btn.setEnabled(False)
         btn_row.addWidget(self.start_queue_btn)
-        self.clear_queue_btn = QPushButton("キューをクリア")
+        self.clear_queue_btn = QPushButton(tr("clear_queue"))
         self.clear_queue_btn.clicked.connect(self.on_clear_queue)
         btn_row.addWidget(self.clear_queue_btn)
-        self.cancel_btn = QPushButton("キャンセル")
-        self.cancel_btn.setToolTip("実行中のダウンロードをすべてキャンセル")
+        self.cancel_btn = QPushButton(tr("cancel"))
+        self.cancel_btn.setToolTip(tr("cancel_tip"))
         self.cancel_btn.clicked.connect(self.on_cancel_downloads)
         self.cancel_btn.setEnabled(False)
         btn_row.addWidget(self.cancel_btn)
-        self.import_btn = QPushButton("インポート")
-        self.import_btn.setToolTip("テキストファイル（1行1URL）からキューに追加")
+        self.import_btn = QPushButton(tr("import_btn"))
+        self.import_btn.setToolTip(tr("import_tip"))
         self.import_btn.clicked.connect(self.on_import_file)
         btn_row.addWidget(self.import_btn)
         btn_row.addStretch()
-        self.open_folder_btn = QPushButton("フォルダを開く")
-        self.open_folder_btn.setToolTip("最後に保存したフォルダを開く")
+        self.open_folder_btn = QPushButton(tr("open_folder"))
+        self.open_folder_btn.setToolTip(tr("open_folder_tip"))
         self.open_folder_btn.clicked.connect(self.on_open_folder)
         self.open_folder_btn.setEnabled(False)
         btn_row.addWidget(self.open_folder_btn)
-        self.play_btn = QPushButton("▶ 再生")
-        self.play_btn.setToolTip("最後に完了したファイルを再生")
+        self.play_btn = QPushButton(tr("play"))
+        self.play_btn.setToolTip(tr("play_tip"))
         self.play_btn.clicked.connect(self.on_play_last)
         self.play_btn.setEnabled(False)
         btn_row.addWidget(self.play_btn)
-        self.history_btn = QPushButton("履歴")
-        self.history_btn.setToolTip("ダウンロード履歴")
+        self.history_btn = QPushButton(tr("history"))
+        self.history_btn.setToolTip(tr("history_tip"))
         self.history_btn.clicked.connect(self.on_show_history)
         btn_row.addWidget(self.history_btn)
-        self.settings_btn = QPushButton("設定")
+        self.settings_btn = QPushButton(tr("settings"))
         self.settings_btn.clicked.connect(self.on_settings)
         btn_row.addWidget(self.settings_btn)
         card_layout.addLayout(btn_row)
@@ -506,7 +660,7 @@ class VibeDLFrame(QMainWindow):
 
         # カード2: キュー + 進捗
         card2, card2_layout = make_card()
-        card2_layout.addWidget(section_label("キュー"))
+        card2_layout.addWidget(section_label(tr("section_queue")))
         self.queue_list = QListWidget()
         self.queue_list.setIconSize(QSize(96, 54))
         self.queue_list.setFixedHeight(110)
@@ -522,7 +676,7 @@ class VibeDLFrame(QMainWindow):
 
         # カード3: ログ
         card3, card3_layout = make_card()
-        card3_layout.addWidget(section_label("ログ"))
+        card3_layout.addWidget(section_label(tr("section_log")))
         self.log_ctrl = QPlainTextEdit()
         self.log_ctrl.setReadOnly(True)
         card3_layout.addWidget(self.log_ctrl)
@@ -543,11 +697,11 @@ class VibeDLFrame(QMainWindow):
 
     def update_settings_display(self):
         self.status_fmt.setText(
-            f"フォーマット: {self.config['output_format']} / {self.config['bitrate']}")
+            tr("status_format", fmt=self.config['output_format'], br=self.config['bitrate']))
         self.status_norm.setText(
-            f"正規化: {'ON' if self.config['normalize'] else 'OFF'} ({self.config['target_lufs']} LUFS)")
+            tr("status_normalize", onoff='ON' if self.config['normalize'] else 'OFF', lufs=self.config['target_lufs']))
         self.status_meta.setText(
-            f"メタデータ: {'ON' if self.config['embed_metadata'] else 'OFF'}")
+            tr("status_metadata", onoff='ON' if self.config['embed_metadata'] else 'OFF'))
 
     def log(self, msg):
         self.log_ctrl.appendPlainText(msg)
@@ -556,9 +710,9 @@ class VibeDLFrame(QMainWindow):
         self.progress.setValue(percent)
         parts = []
         if speed:
-            parts.append(f"速度: {speed}")
+            parts.append(tr("speed", speed=speed))
         if eta:
-            parts.append(f"残り: {eta}")
+            parts.append(tr("eta", eta=eta))
         if parts:
             self.status_label.setText("  ".join(parts))
 
@@ -599,21 +753,21 @@ class VibeDLFrame(QMainWindow):
         if ("youtube.com/watch" in text or "youtu.be/" in text) and text.startswith("http"):
             if text != self.url_ctrl.currentText().strip():
                 self.url_ctrl.setCurrentText(text)
-                self.log("🔗 クリップボードからURLを貼り付けました")
+                self.log(tr("clipboard_pasted"))
 
     # ---------- FFmpeg ----------
     def check_ffmpeg_on_startup(self):
         if check_ffmpeg(self.ffmpeg_info['path']):
             return
         answer = QMessageBox.question(
-            self, "FFmpeg 未検出",
-            "FFmpegが見つかりません。自動ダウンロードしますか？")
+            self, tr("ffmpeg_not_found_title"),
+            tr("ffmpeg_not_found_msg"))
         if answer != QMessageBox.Yes:
-            self.log("FFmpeg なしで続行します。音量正規化は利用不可。")
+            self.log(tr("ffmpeg_without"))
             return
-        self.log("FFmpegをダウンロード中...")
-        dialog = QProgressDialog("ダウンロードしています...", None, 0, 100, self)
-        dialog.setWindowTitle("FFmpeg ダウンロード")
+        self.log(tr("ffmpeg_downloading"))
+        dialog = QProgressDialog(tr("ffmpeg_dialog"), None, 0, 100, self)
+        dialog.setWindowTitle(tr("ffmpeg_dialog_title"))
         dialog.setCancelButton(None)
         dialog.setModal(True)
         thread = FFmpegDownloadThread(self)
@@ -626,9 +780,9 @@ class VibeDLFrame(QMainWindow):
             dialog.accept()
             if path:
                 self.ffmpeg_info = get_ffmpeg_info()
-                self.log("FFmpeg の準備が完了しました。")
+                self.log(tr("ffmpeg_ready"))
             else:
-                self.log("FFmpeg のダウンロードに失敗しました。")
+                self.log(tr("ffmpeg_failed"))
 
         thread.progress.connect(on_progress)
         thread.done.connect(on_done)
@@ -644,11 +798,11 @@ class VibeDLFrame(QMainWindow):
             end_sec = parse_time(self.end_ctrl.text())
         except ValueError:
             QMessageBox.warning(
-                self, "入力エラー",
-                "開始・終了は「秒」または「mm:ss」で入力してください。")
+                self, tr("input_error"),
+                tr("time_format_msg"))
             return None
         if start_sec is not None and end_sec is not None and end_sec <= start_sec:
-            QMessageBox.warning(self, "入力エラー", "終了は開始より後を指定してください。")
+            QMessageBox.warning(self, tr("input_error"), tr("end_after_start_msg"))
             return None
         return (start_sec, end_sec)
 
@@ -674,7 +828,7 @@ class VibeDLFrame(QMainWindow):
         self.queue.append(item)
         self.add_to_history(url)
         self.update_queue_display()
-        self.log(f"キューに追加: {title or url}")
+        self.log(tr("added_to_queue", name=title or url))
         if thumb_url:
             self._fetch_thumb(item)
         elif fetch_info:
@@ -710,24 +864,24 @@ class VibeDLFrame(QMainWindow):
     def _dispatch_add(self, url, start_sec, end_sec):
         """プレイリストURLなら展開し、それ以外はそのままキューへ追加する。"""
         if self._is_playlist_url(url):
-            self.log("プレイリストを展開中...")
+            self.log(tr("playlist_expanding"))
             browser, cookie_file = self._cookie_args()
             worker = PlaylistWorker(url, browser, cookie_file, self)
 
             def _got(entries, s=start_sec, e=end_sec):
                 if not entries:
-                    self.log("プレイリストに動画が見つかりませんでした")
+                    self.log(tr("playlist_empty"))
                     return
                 for entry in entries:
                     self._add_item(entry['url'], s, e, title=entry['title'],
                                    duration=entry['duration'],
                                    thumb_url=entry.get('thumb'),
                                    fetch_info=False)
-                self.log(f"プレイリストから{len(entries)}件追加しました")
+                self.log(tr("playlist_added", n=len(entries)))
 
             worker.got.connect(_got)
             worker.failed.connect(
-                lambda msg: self.log(f"プレイリストの展開に失敗しました: {msg}"))
+                lambda msg: self.log(tr("playlist_failed", msg=msg)))
             self._keep_thread(worker)
             worker.start()
         else:
@@ -752,7 +906,7 @@ class VibeDLFrame(QMainWindow):
     def on_add_to_queue(self):
         url = self.url_ctrl.currentText().strip()
         if not url:
-            QMessageBox.warning(self, "入力エラー", "URLを入力してください。")
+            QMessageBox.warning(self, tr("input_error"), tr("url_required"))
             return
         time_range = self._current_time_range()
         if time_range is None:
@@ -782,7 +936,7 @@ class VibeDLFrame(QMainWindow):
 
     def on_start_queue(self):
         if not self.queue:
-            QMessageBox.information(self, "情報", "キューが空です。")
+            QMessageBox.information(self, tr("info_title"), tr("queue_empty"))
             return
         self.start_queue()
 
@@ -813,7 +967,7 @@ class VibeDLFrame(QMainWindow):
         for worker in list(self.active_workers):
             worker.cancel()
         self.cancel_btn.setEnabled(False)
-        self.log("キャンセルを要求しました（ダウンロード中はすぐ、変換・音量調整中は工程の合間で止まります）")
+        self.log(tr("cancel_requested"))
 
     def on_item_cancelled(self, item):
         if item in self.queue:
@@ -826,7 +980,7 @@ class VibeDLFrame(QMainWindow):
             self.start_queue()
         elif not self.active_workers:
             self.cancel_btn.setEnabled(False)
-            self.status_label.setText("キャンセルしました")
+            self.status_label.setText(tr("status_cancelled"))
 
     def on_item_completed(self, item, dest_path):
         if item in self.queue:
@@ -836,7 +990,7 @@ class VibeDLFrame(QMainWindow):
                 self.open_folder_btn.setEnabled(True)
                 self.play_btn.setEnabled(True)
                 self._record_download_history(item, dest_path)
-                self.notify_user("ダウンロード完了", os.path.basename(dest_path))
+                self.notify_user(tr("notify_complete"), os.path.basename(dest_path))
             self.queue.remove(item)
         sender = self.sender()
         if sender in self.active_workers:
@@ -847,12 +1001,12 @@ class VibeDLFrame(QMainWindow):
         elif not self.active_workers:
             self.cancel_btn.setEnabled(False)
             self.progress.setValue(100)
-            self.status_label.setText("完了")
+            self.status_label.setText(tr("status_done"))
 
     def on_clear_queue(self):
         self.queue = [i for i in self.queue if i.status != "waiting"]
         self.update_queue_display()
-        self.log("キューをクリアしました。")
+        self.log(tr("queue_cleared"))
 
     # ---------- ドラッグ＆ドロップ / インポート ----------
     def dragEnterEvent(self, event):
@@ -870,21 +1024,21 @@ class VibeDLFrame(QMainWindow):
                         self._import_text(f.read())
                     handled = True
                 except OSError as e:
-                    self.log(f"ファイルの読み込みに失敗しました: {e}")
+                    self.log(tr("file_read_failed", err=e))
         if not handled and mime.hasText():
             self._import_text(mime.text())
         event.acceptProposedAction()
 
     def on_import_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "URLリストを選択", "", "テキストファイル (*.txt);;すべてのファイル (*.*)")
+            self, tr("import_dialog_title"), "", tr("filter_text"))
         if not path:
             return
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 self._import_text(f.read())
         except OSError as e:
-            QMessageBox.warning(self, "エラー", f"ファイルを読み込めませんでした: {e}")
+            QMessageBox.warning(self, tr("error_title"), tr("file_unreadable", err=e))
 
     def _import_text(self, text):
         urls = []
@@ -896,7 +1050,7 @@ class VibeDLFrame(QMainWindow):
             if match:
                 urls.append(match.group(0))
         if not urls:
-            self.log("URLが見つかりませんでした")
+            self.log(tr("no_urls"))
             return
         time_range = self._current_time_range()
         if time_range is None:
@@ -904,7 +1058,7 @@ class VibeDLFrame(QMainWindow):
         start_sec, end_sec = time_range
         for url in urls:
             self._dispatch_add(url, start_sec, end_sec)
-        self.log(f"{len(urls)}件のURLを読み込みました")
+        self.log(tr("urls_loaded", n=len(urls)))
 
     # ---------- 再生 / 履歴 ----------
     def on_play_last(self):
@@ -951,22 +1105,22 @@ class VibeDLFrame(QMainWindow):
 class SearchDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
-        self.setWindowTitle("YouTube検索")
+        self.setWindowTitle(tr("search_title"))
         self.resize(660, 480)
         self._thread = None
 
         layout = QVBoxLayout(self)
         row = QHBoxLayout()
         self.keyword_ctrl = QLineEdit()
-        self.keyword_ctrl.setPlaceholderText("キーワードを入力")
+        self.keyword_ctrl.setPlaceholderText(tr("keyword_placeholder"))
         self.keyword_ctrl.returnPressed.connect(self.on_search)
         row.addWidget(self.keyword_ctrl, 1)
-        self.search_btn = QPushButton("検索")
+        self.search_btn = QPushButton(tr("search"))
         self.search_btn.clicked.connect(self.on_search)
         row.addWidget(self.search_btn)
         layout.addLayout(row)
 
-        self.status_label = QLabel("キーワードを入力して検索してください（最大10件）")
+        self.status_label = QLabel(tr("search_status_initial"))
         self.status_label.setObjectName("muted")
         layout.addWidget(self.status_label)
 
@@ -977,11 +1131,11 @@ class SearchDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        add_btn = QPushButton("選択をキューに追加")
+        add_btn = QPushButton(tr("add_selected"))
         add_btn.setObjectName("primary")
         add_btn.clicked.connect(self.on_add_selected)
         btn_row.addWidget(add_btn)
-        close_btn = QPushButton("閉じる")
+        close_btn = QPushButton(tr("close"))
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
@@ -993,7 +1147,7 @@ class SearchDialog(QDialog):
         if not keyword:
             return
         self.search_btn.setEnabled(False)
-        self.status_label.setText("検索中...")
+        self.status_label.setText(tr("searching"))
         self.results_list.clear()
         self._thread = SearchWorker(keyword, self)
         self._thread.results.connect(self.on_results)
@@ -1011,20 +1165,20 @@ class SearchDialog(QDialog):
             item.setData(Qt.UserRole, r)
             self.results_list.addItem(item)
         if results:
-            self.status_label.setText(f"{len(results)}件見つかりました。複数選択もできます")
+            self.status_label.setText(tr("results_found", n=len(results)))
         else:
-            self.status_label.setText("見つかりませんでした")
+            self.status_label.setText(tr("no_results"))
 
     def on_failed(self, message):
         self.search_btn.setEnabled(True)
-        self.status_label.setText(f"検索に失敗しました: {message}")
+        self.status_label.setText(tr("search_failed", msg=message))
 
     def selected_items(self):
         return [item.data(Qt.UserRole) for item in self.results_list.selectedItems()]
 
     def on_add_selected(self):
         if not self.selected_items():
-            QMessageBox.information(self, "情報", "結果を選択してください。")
+            QMessageBox.information(self, tr("info_title"), tr("select_result"))
             return
         self.accept()
 
@@ -1038,7 +1192,7 @@ class HistoryDialog(QDialog):
     def __init__(self, parent, entries):
         super().__init__(parent)
         self.frame = parent
-        self.setWindowTitle("ダウンロード履歴")
+        self.setWindowTitle(tr("history_title"))
         self.resize(660, 440)
 
         layout = QVBoxLayout(self)
@@ -1046,23 +1200,23 @@ class HistoryDialog(QDialog):
         for entry in entries:
             text = f"{entry.get('title', '')}  ―  {entry.get('date', '')}"
             if not os.path.exists(entry.get('path', '')):
-                text += "（ファイルなし）"
+                text += tr("missing_file_suffix")
             item = QListWidgetItem(text)
             item.setData(Qt.UserRole, entry)
             self.list_widget.addItem(item)
         layout.addWidget(self.list_widget, 1)
         if not entries:
-            self.list_widget.addItem("履歴はまだありません")
+            self.list_widget.addItem(tr("history_empty"))
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        play_btn = QPushButton("再生")
+        play_btn = QPushButton(tr("play2"))
         play_btn.clicked.connect(self.on_play)
         btn_row.addWidget(play_btn)
-        redl_btn = QPushButton("再ダウンロード")
+        redl_btn = QPushButton(tr("redownload"))
         redl_btn.clicked.connect(self.on_redownload)
         btn_row.addWidget(redl_btn)
-        close_btn = QPushButton("閉じる")
+        close_btn = QPushButton(tr("close"))
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
@@ -1076,7 +1230,7 @@ class HistoryDialog(QDialog):
         if entry and os.path.exists(entry.get('path', '')):
             os.startfile(entry['path'])
         elif entry:
-            QMessageBox.information(self, "情報", "ファイルが見つかりません。")
+            QMessageBox.information(self, tr("info_title"), tr("file_not_found"))
 
     def on_redownload(self):
         entry = self._selected_entry()
@@ -1093,7 +1247,7 @@ class HistoryDialog(QDialog):
 class SettingsDialog(QDialog):
     def __init__(self, parent, config):
         super().__init__(parent)
-        self.setWindowTitle("設定")
+        self.setWindowTitle(tr("settings_title"))
         self.resize(480, 520)
         self.config = dict(config)
         self.config["url_history"] = list(config.get("url_history", []))
@@ -1107,7 +1261,7 @@ class SettingsDialog(QDialog):
         output_tab = QWidget()
         out_layout = QVBoxLayout(output_tab)
         fmt_row = QHBoxLayout()
-        fmt_row.addWidget(QLabel("フォーマット:"))
+        fmt_row.addWidget(QLabel(tr("format_label")))
         self.fmt_combo = QComboBox()
         self.fmt_combo.addItems(["mp3", "m4a", "wav", "flac"])
         self.fmt_combo.setCurrentText(self.config["output_format"])
@@ -1115,7 +1269,7 @@ class SettingsDialog(QDialog):
         out_layout.addLayout(fmt_row)
 
         br_row = QHBoxLayout()
-        br_row.addWidget(QLabel("ビットレート:"))
+        br_row.addWidget(QLabel(tr("bitrate_label")))
         self.br_combo = QComboBox()
         self.br_combo.addItems(["128k", "160k", "192k", "256k", "320k"])
         self.br_combo.setCurrentText(self.config["bitrate"])
@@ -1123,32 +1277,32 @@ class SettingsDialog(QDialog):
         out_layout.addLayout(br_row)
 
         folder_row = QHBoxLayout()
-        folder_row.addWidget(QLabel("保存先:"))
+        folder_row.addWidget(QLabel(tr("folder_label")))
         self.folder_ctrl = QLineEdit(self.config["output_folder"])
         folder_row.addWidget(self.folder_ctrl, 1)
-        browse_btn = QPushButton("参照")
+        browse_btn = QPushButton(tr("browse"))
         browse_btn.clicked.connect(self.on_browse_folder)
         folder_row.addWidget(browse_btn)
         out_layout.addLayout(folder_row)
 
         name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("ファイル名パターン:"))
+        name_row.addWidget(QLabel(tr("name_pattern_label")))
         self.name_template_ctrl = QLineEdit(self.config.get("name_template", "{title}"))
         self.name_template_ctrl.setPlaceholderText("{title} - {uploader}")
         name_row.addWidget(self.name_template_ctrl, 1)
         out_layout.addLayout(name_row)
         out_layout.addStretch()
-        tabs.addTab(output_tab, "出力")
+        tabs.addTab(output_tab, tr("tab_output"))
 
         # 処理タブ
         proc_tab = QWidget()
         proc_layout = QVBoxLayout(proc_tab)
-        self.normalize_cb = QCheckBox("音量正規化")
+        self.normalize_cb = QCheckBox(tr("normalize_cb"))
         self.normalize_cb.setChecked(self.config["normalize"])
         self.normalize_cb.toggled.connect(self.on_normalize_toggle)
         proc_layout.addWidget(self.normalize_cb)
         lufs_row = QHBoxLayout()
-        lufs_row.addWidget(QLabel("目標 LUFS:"))
+        lufs_row.addWidget(QLabel(tr("lufs_label")))
         self.lufs_spin = QDoubleSpinBox()
         self.lufs_spin.setRange(-70.0, 0.0)
         self.lufs_spin.setSingleStep(0.5)
@@ -1157,39 +1311,55 @@ class SettingsDialog(QDialog):
         lufs_row.addWidget(self.lufs_spin)
         lufs_row.addStretch()
         proc_layout.addLayout(lufs_row)
-        self.meta_cb = QCheckBox("メタデータ埋め込み")
+        self.meta_cb = QCheckBox(tr("meta_cb"))
         self.meta_cb.setChecked(self.config["embed_metadata"])
         proc_layout.addWidget(self.meta_cb)
+        self.trim_cb = QCheckBox(tr("trim_cb"))
+        self.trim_cb.setChecked(self.config.get("trim_silence", False))
+        proc_layout.addWidget(self.trim_cb)
+        self.fade_cb = QCheckBox(tr("fade_cb"))
+        self.fade_cb.setChecked(self.config.get("fade_enabled", False))
+        proc_layout.addWidget(self.fade_cb)
+        fade_row = QHBoxLayout()
+        fade_row.addWidget(QLabel(tr("fade_sec_label")))
+        self.fade_spin = QDoubleSpinBox()
+        self.fade_spin.setRange(0.5, 10.0)
+        self.fade_spin.setSingleStep(0.5)
+        self.fade_spin.setDecimals(1)
+        self.fade_spin.setValue(float(self.config.get("fade_seconds", 1.0)))
+        fade_row.addWidget(self.fade_spin)
+        fade_row.addStretch()
+        proc_layout.addLayout(fade_row)
         proc_layout.addStretch()
         self.on_normalize_toggle()
-        tabs.addTab(proc_tab, "処理")
+        tabs.addTab(proc_tab, tr("tab_processing"))
 
         # 通知タブ
         notif_tab = QWidget()
         notif_layout = QVBoxLayout(notif_tab)
-        self.sound_cb = QCheckBox("完了時に通知音を鳴らす")
+        self.sound_cb = QCheckBox(tr("sound_cb"))
         self.sound_cb.setChecked(self.config.get("notify_sound", True))
         notif_layout.addWidget(self.sound_cb)
-        self.toast_cb = QCheckBox("完了時にトースト通知を表示")
+        self.toast_cb = QCheckBox(tr("toast_cb"))
         self.toast_cb.setChecked(self.config.get("notify_toast", True))
         notif_layout.addWidget(self.toast_cb)
         notif_layout.addStretch()
-        tabs.addTab(notif_tab, "通知")
+        tabs.addTab(notif_tab, tr("tab_notif"))
 
         # 一般タブ
         general_tab = QWidget()
         general_layout = QVBoxLayout(general_tab)
-        self.dark_cb = QCheckBox("ダークモード")
+        self.dark_cb = QCheckBox(tr("dark_cb"))
         self.dark_cb.setChecked(self.config.get("dark_mode", False))
         self.dark_cb.toggled.connect(self.on_dark_toggle)
         general_layout.addWidget(self.dark_cb)
-        self.clipboard_cb = QCheckBox("クリップボードを監視してURLを自動入力")
+        self.clipboard_cb = QCheckBox(tr("clipboard_cb"))
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
         cookie_row = QHBoxLayout()
-        cookie_row.addWidget(QLabel("ブラウザCookie（年齢制限など用）"))
+        cookie_row.addWidget(QLabel(tr("cookies_label")))
         self.cookies_combo = QComboBox()
-        self.cookies_combo.addItems(["使用しない", "Chrome", "Edge", "Firefox"])
+        self.cookies_combo.addItems([tr("cookies_none"), "Chrome", "Edge", "Firefox"])
         cookie_values = ["", "chrome", "edge", "firefox"]
         current_cookie = self.config.get("cookies_browser", "")
         self.cookies_combo.setCurrentIndex(
@@ -1198,17 +1368,29 @@ class SettingsDialog(QDialog):
         cookie_row.addStretch()
         general_layout.addLayout(cookie_row)
         file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("cookies.txt（指定時は優先）"))
+        file_row.addWidget(QLabel(tr("cookies_file_label")))
         self.cookies_file_ctrl = QLineEdit()
         self.cookies_file_ctrl.setText(self.config.get("cookies_file", ""))
-        self.cookies_file_ctrl.setPlaceholderText("cookies.txt のパス（任意）")
+        self.cookies_file_ctrl.setPlaceholderText(tr("cookies_file_ph"))
         file_row.addWidget(self.cookies_file_ctrl, 1)
-        browse_cookie_btn = QPushButton("選択")
+        browse_cookie_btn = QPushButton(tr("select"))
         browse_cookie_btn.clicked.connect(self.on_browse_cookies_file)
         file_row.addWidget(browse_cookie_btn)
         general_layout.addLayout(file_row)
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel(tr("language_label")))
+        self.language_combo = QComboBox()
+        self.language_combo.addItems(["日本語", "English"])
+        self.language_combo.setCurrentIndex(
+            1 if self.config.get("language", "ja") == "en" else 0)
+        lang_row.addWidget(self.language_combo)
+        lang_row.addStretch()
+        general_layout.addLayout(lang_row)
+        lang_note = QLabel(tr("language_note"))
+        lang_note.setObjectName("muted")
+        general_layout.addWidget(lang_note)
         general_layout.addStretch()
-        tabs.addTab(general_tab, "一般")
+        tabs.addTab(general_tab, tr("tab_general"))
 
         layout.addWidget(tabs)
 
@@ -1218,7 +1400,7 @@ class SettingsDialog(QDialog):
         ok_btn.setObjectName("primary")
         ok_btn.clicked.connect(self.accept)
         btn_row.addWidget(ok_btn)
-        cancel_btn = QPushButton("キャンセル")
+        cancel_btn = QPushButton(tr("cancel"))
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
@@ -1232,13 +1414,13 @@ class SettingsDialog(QDialog):
 
     def on_browse_folder(self):
         path = QFileDialog.getExistingDirectory(
-            self, "フォルダを選択", self.folder_ctrl.text())
+            self, tr("folder_dialog"), self.folder_ctrl.text())
         if path:
             self.folder_ctrl.setText(path)
 
     def on_browse_cookies_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "cookies.txt を選択", "", "テキストファイル (*.txt);;すべてのファイル (*.*)")
+            self, tr("cookies_dialog"), "", tr("filter_text"))
         if path:
             self.cookies_file_ctrl.setText(path)
 
@@ -1249,12 +1431,16 @@ class SettingsDialog(QDialog):
         self.config["target_lufs"] = self.lufs_spin.value()
         self.config["normalize"] = self.normalize_cb.isChecked()
         self.config["embed_metadata"] = self.meta_cb.isChecked()
+        self.config["trim_silence"] = self.trim_cb.isChecked()
+        self.config["fade_enabled"] = self.fade_cb.isChecked()
+        self.config["fade_seconds"] = self.fade_spin.value()
         self.config["dark_mode"] = self.dark_cb.isChecked()
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
         self.config["cookies_browser"] = ["", "chrome", "edge", "firefox"][self.cookies_combo.currentIndex()]
         self.config["cookies_file"] = self.cookies_file_ctrl.text().strip()
+        self.config["language"] = ["ja", "en"][self.language_combo.currentIndex()]
         self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
 
