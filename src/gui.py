@@ -5,10 +5,13 @@ wxPython 版から移行した GUI。見た目は QSS（Qt Style Sheets）で
 ダウンロード・音声処理・設定保存は従来モジュールをそのまま使う。
 """
 import os
+import re
 import sys
+import urllib.request
 import winsound
+from datetime import datetime
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
@@ -18,12 +21,16 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from downloader import download_audio, search_youtube
+from downloader import (
+    download_audio, search_youtube, get_playlist_entries, get_video_info,
+)
 from audio_processor import (
     normalize_audio, embed_metadata,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
 )
-from config_store import get_config, save_config
+from config_store import (
+    get_config, save_config, load_download_history, save_download_history,
+)
 
 ACCENT = "#7C5CFF"
 
@@ -142,6 +149,11 @@ class QueueItem:
         self.start_sec = start_sec
         self.end_sec = end_sec
         self.status = "waiting"
+        # 情報取得後に埋まる表示用メタデータ
+        self.title = None
+        self.duration = None
+        self.thumb_url = None
+        self.thumb_data = None  # サムネイル画像のバイト列
 
 
 class DownloadCancelled(Exception):
@@ -194,6 +206,8 @@ class DownloadWorker(QThread):
                 start_sec=self.item.start_sec,
                 end_sec=self.item.end_sec,
                 name_template=self.config.get("name_template", "{title}"),
+                cookies_browser=self.config.get("cookies_browser") or None,
+                cookies_file=self.config.get("cookies_file") or None,
             )
             self.log.emit("[1/3] ダウンロード完了")
             temp_out = data['temp_raw']
@@ -293,6 +307,64 @@ class SearchWorker(QThread):
             self.failed.emit(str(e))
 
 
+class InfoWorker(QThread):
+    """キュー追加時に動画情報（タイトル・長さ・サムネイル）を取得する。"""
+    got = Signal(object, dict)
+    failed = Signal(object)
+
+    def __init__(self, item, cookies_browser=None, cookies_file=None, parent=None):
+        super().__init__(parent)
+        self.item = item
+        self.cookies_browser = cookies_browser
+        self.cookies_file = cookies_file
+
+    def run(self):
+        try:
+            info = get_video_info(self.item.url, self.cookies_browser, self.cookies_file)
+            self.got.emit(self.item, info)
+        except Exception:
+            self.failed.emit(self.item)
+
+
+class ThumbWorker(QThread):
+    """サムネイル画像をダウンロードする。"""
+    got = Signal(object, bytes)
+
+    def __init__(self, item, url, parent=None):
+        super().__init__(parent)
+        self.item = item
+        self.url = url
+
+    def run(self):
+        try:
+            req = urllib.request.Request(
+                self.url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+            if data:
+                self.got.emit(self.item, data)
+        except Exception:
+            pass
+
+
+class PlaylistWorker(QThread):
+    """プレイリストを展開して収録動画の一覧を返す。"""
+    got = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, url, cookies_browser=None, cookies_file=None, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.cookies_browser = cookies_browser
+        self.cookies_file = cookies_file
+
+    def run(self):
+        try:
+            self.got.emit(get_playlist_entries(self.url, self.cookies_browser, self.cookies_file))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 def make_card():
     card = QFrame()
     card.setObjectName("card")
@@ -322,6 +394,9 @@ class VibeDLFrame(QMainWindow):
         self.active_workers = []
         self.max_workers = 2
         self.last_dest_path = None
+        self.download_history = load_download_history()
+        self._bg_threads = set()
+        self.setAcceptDrops(True)
 
         self._init_ui()
         self.apply_theme()
@@ -404,12 +479,25 @@ class VibeDLFrame(QMainWindow):
         self.cancel_btn.clicked.connect(self.on_cancel_downloads)
         self.cancel_btn.setEnabled(False)
         btn_row.addWidget(self.cancel_btn)
+        self.import_btn = QPushButton("インポート")
+        self.import_btn.setToolTip("テキストファイル（1行1URL）からキューに追加")
+        self.import_btn.clicked.connect(self.on_import_file)
+        btn_row.addWidget(self.import_btn)
         btn_row.addStretch()
         self.open_folder_btn = QPushButton("フォルダを開く")
         self.open_folder_btn.setToolTip("最後に保存したフォルダを開く")
         self.open_folder_btn.clicked.connect(self.on_open_folder)
         self.open_folder_btn.setEnabled(False)
         btn_row.addWidget(self.open_folder_btn)
+        self.play_btn = QPushButton("▶ 再生")
+        self.play_btn.setToolTip("最後に完了したファイルを再生")
+        self.play_btn.clicked.connect(self.on_play_last)
+        self.play_btn.setEnabled(False)
+        btn_row.addWidget(self.play_btn)
+        self.history_btn = QPushButton("履歴")
+        self.history_btn.setToolTip("ダウンロード履歴")
+        self.history_btn.clicked.connect(self.on_show_history)
+        btn_row.addWidget(self.history_btn)
         self.settings_btn = QPushButton("設定")
         self.settings_btn.clicked.connect(self.on_settings)
         btn_row.addWidget(self.settings_btn)
@@ -420,6 +508,7 @@ class VibeDLFrame(QMainWindow):
         card2, card2_layout = make_card()
         card2_layout.addWidget(section_label("キュー"))
         self.queue_list = QListWidget()
+        self.queue_list.setIconSize(QSize(96, 54))
         self.queue_list.setFixedHeight(110)
         card2_layout.addWidget(self.queue_list)
         self.progress = QProgressBar()
@@ -563,22 +652,102 @@ class VibeDLFrame(QMainWindow):
             return None
         return (start_sec, end_sec)
 
+    # ---------- キュー追加（共通） ----------
+    def _cookie_args(self):
+        return (self.config.get("cookies_browser") or None,
+                self.config.get("cookies_file") or None)
+
+    @staticmethod
+    def _is_playlist_url(url):
+        return "list=" in url or "youtube.com/playlist" in url
+
+    def _keep_thread(self, thread):
+        self._bg_threads.add(thread)
+        thread.finished.connect(lambda: self._bg_threads.discard(thread))
+
+    def _add_item(self, url, start_sec, end_sec, title=None, duration=None,
+                  thumb_url=None, fetch_info=True):
+        item = QueueItem(url, start_sec, end_sec)
+        item.title = title
+        item.duration = duration
+        item.thumb_url = thumb_url
+        self.queue.append(item)
+        self.add_to_history(url)
+        self.update_queue_display()
+        self.log(f"キューに追加: {title or url}")
+        if thumb_url:
+            self._fetch_thumb(item)
+        elif fetch_info:
+            browser, cookie_file = self._cookie_args()
+            worker = InfoWorker(item, browser, cookie_file, self)
+            worker.got.connect(self._on_info_got)
+            self._keep_thread(worker)
+            worker.start()
+        return item
+
+    def _fetch_thumb(self, item):
+        worker = ThumbWorker(item, item.thumb_url, self)
+        worker.got.connect(self._on_thumb_got)
+        self._keep_thread(worker)
+        worker.start()
+
+    def _on_info_got(self, item, info):
+        if item not in self.queue:
+            return
+        item.title = info.get('title')
+        item.duration = info.get('duration')
+        item.thumb_url = info.get('thumb')
+        self.update_queue_display()
+        if item.thumb_url:
+            self._fetch_thumb(item)
+
+    def _on_thumb_got(self, item, data):
+        if item not in self.queue:
+            return
+        item.thumb_data = data
+        self.update_queue_display()
+
+    def _dispatch_add(self, url, start_sec, end_sec):
+        """プレイリストURLなら展開し、それ以外はそのままキューへ追加する。"""
+        if self._is_playlist_url(url):
+            self.log("プレイリストを展開中...")
+            browser, cookie_file = self._cookie_args()
+            worker = PlaylistWorker(url, browser, cookie_file, self)
+
+            def _got(entries, s=start_sec, e=end_sec):
+                if not entries:
+                    self.log("プレイリストに動画が見つかりませんでした")
+                    return
+                for entry in entries:
+                    self._add_item(entry['url'], s, e, title=entry['title'],
+                                   duration=entry['duration'],
+                                   thumb_url=entry.get('thumb'),
+                                   fetch_info=False)
+                self.log(f"プレイリストから{len(entries)}件追加しました")
+
+            worker.got.connect(_got)
+            worker.failed.connect(
+                lambda msg: self.log(f"プレイリストの展開に失敗しました: {msg}"))
+            self._keep_thread(worker)
+            worker.start()
+        else:
+            self._add_item(url, start_sec, end_sec)
+
     def on_search(self):
         dlg = SearchDialog(self)
         if dlg.exec() != QDialog.Accepted:
             return
-        urls = dlg.selected_urls()
-        if not urls:
+        selected = dlg.selected_items()
+        if not selected:
             return
         time_range = self._current_time_range()
         if time_range is None:
             return
         start_sec, end_sec = time_range
-        for url in urls:
-            self.queue.append(QueueItem(url, start_sec, end_sec))
-            self.add_to_history(url)
-            self.log(f"キューに追加: {url}")
-        self.update_queue_display()
+        for entry in selected:
+            self._add_item(entry['url'], start_sec, end_sec,
+                           title=entry['title'], duration=entry['duration'],
+                           thumb_url=entry.get('thumb'), fetch_info=False)
 
     def on_add_to_queue(self):
         url = self.url_ctrl.currentText().strip()
@@ -589,20 +758,25 @@ class VibeDLFrame(QMainWindow):
         if time_range is None:
             return
         start_sec, end_sec = time_range
-        item = QueueItem(url, start_sec, end_sec)
-        self.queue.append(item)
-        self.update_queue_display()
+        self._dispatch_add(url, start_sec, end_sec)
         self.url_ctrl.setCurrentText("")
         self.start_ctrl.clear()
         self.end_ctrl.clear()
-        self.add_to_history(url)
-        self.log(f"キューに追加: {url}")
 
     def update_queue_display(self):
         self.queue_list.clear()
         icons = {"waiting": "⏳", "downloading": "⬇️", "done": "✅"}
         for item in self.queue:
-            self.queue_list.addItem(f"{icons.get(item.status, '')} {item.url}")
+            label = item.title or item.url
+            if item.duration:
+                label += f"  ({format_duration(item.duration)})"
+            list_item = QListWidgetItem(f"{icons.get(item.status, '')} {label}")
+            if item.thumb_data:
+                pixmap = QPixmap()
+                if pixmap.loadFromData(item.thumb_data):
+                    list_item.setIcon(QIcon(pixmap.scaled(
+                        96, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            self.queue_list.addItem(list_item)
         has_waiting = any(item.status == "waiting" for item in self.queue)
         self.start_queue_btn.setEnabled(has_waiting)
 
@@ -660,6 +834,8 @@ class VibeDLFrame(QMainWindow):
             if dest_path:
                 self.last_dest_path = dest_path
                 self.open_folder_btn.setEnabled(True)
+                self.play_btn.setEnabled(True)
+                self._record_download_history(item, dest_path)
                 self.notify_user("ダウンロード完了", os.path.basename(dest_path))
             self.queue.remove(item)
         sender = self.sender()
@@ -677,6 +853,78 @@ class VibeDLFrame(QMainWindow):
         self.queue = [i for i in self.queue if i.status != "waiting"]
         self.update_queue_display()
         self.log("キューをクリアしました。")
+
+    # ---------- ドラッグ＆ドロップ / インポート ----------
+    def dragEnterEvent(self, event):
+        mime = event.mimeData()
+        if mime.hasUrls() or mime.hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        mime = event.mimeData()
+        handled = False
+        for url in mime.urls():
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".txt"):
+                try:
+                    with open(url.toLocalFile(), encoding="utf-8", errors="replace") as f:
+                        self._import_text(f.read())
+                    handled = True
+                except OSError as e:
+                    self.log(f"ファイルの読み込みに失敗しました: {e}")
+        if not handled and mime.hasText():
+            self._import_text(mime.text())
+        event.acceptProposedAction()
+
+    def on_import_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "URLリストを選択", "", "テキストファイル (*.txt);;すべてのファイル (*.*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                self._import_text(f.read())
+        except OSError as e:
+            QMessageBox.warning(self, "エラー", f"ファイルを読み込めませんでした: {e}")
+
+    def _import_text(self, text):
+        urls = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.search(r"https?://[^\s]+", line)
+            if match:
+                urls.append(match.group(0))
+        if not urls:
+            self.log("URLが見つかりませんでした")
+            return
+        time_range = self._current_time_range()
+        if time_range is None:
+            return
+        start_sec, end_sec = time_range
+        for url in urls:
+            self._dispatch_add(url, start_sec, end_sec)
+        self.log(f"{len(urls)}件のURLを読み込みました")
+
+    # ---------- 再生 / 履歴 ----------
+    def on_play_last(self):
+        if self.last_dest_path and os.path.exists(self.last_dest_path):
+            os.startfile(self.last_dest_path)
+
+    def on_show_history(self):
+        dlg = HistoryDialog(self, self.download_history)
+        dlg.exec()
+
+    def _record_download_history(self, item, dest_path):
+        entry = {
+            'title': item.title or os.path.basename(dest_path),
+            'url': item.url,
+            'path': dest_path,
+            'date': datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        self.download_history.insert(0, entry)
+        self.download_history = self.download_history[:50]
+        save_download_history(self.download_history)
 
     # ---------- その他 ----------
     def on_open_folder(self):
@@ -760,7 +1008,7 @@ class SearchDialog(QDialog):
                 text += f"  ―  {r['uploader']}"
             text += f"  ({format_duration(r['duration'])})"
             item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, r['url'])
+            item.setData(Qt.UserRole, r)
             self.results_list.addItem(item)
         if results:
             self.status_label.setText(f"{len(results)}件見つかりました。複数選択もできます")
@@ -771,11 +1019,11 @@ class SearchDialog(QDialog):
         self.search_btn.setEnabled(True)
         self.status_label.setText(f"検索に失敗しました: {message}")
 
-    def selected_urls(self):
+    def selected_items(self):
         return [item.data(Qt.UserRole) for item in self.results_list.selectedItems()]
 
     def on_add_selected(self):
-        if not self.selected_urls():
+        if not self.selected_items():
             QMessageBox.information(self, "情報", "結果を選択してください。")
             return
         self.accept()
@@ -783,6 +1031,62 @@ class SearchDialog(QDialog):
     def on_double_click(self, item):
         self.results_list.clearSelection()
         item.setSelected(True)
+        self.accept()
+
+
+class HistoryDialog(QDialog):
+    def __init__(self, parent, entries):
+        super().__init__(parent)
+        self.frame = parent
+        self.setWindowTitle("ダウンロード履歴")
+        self.resize(660, 440)
+
+        layout = QVBoxLayout(self)
+        self.list_widget = QListWidget()
+        for entry in entries:
+            text = f"{entry.get('title', '')}  ―  {entry.get('date', '')}"
+            if not os.path.exists(entry.get('path', '')):
+                text += "（ファイルなし）"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, entry)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget, 1)
+        if not entries:
+            self.list_widget.addItem("履歴はまだありません")
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        play_btn = QPushButton("再生")
+        play_btn.clicked.connect(self.on_play)
+        btn_row.addWidget(play_btn)
+        redl_btn = QPushButton("再ダウンロード")
+        redl_btn.clicked.connect(self.on_redownload)
+        btn_row.addWidget(redl_btn)
+        close_btn = QPushButton("閉じる")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _selected_entry(self):
+        item = self.list_widget.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def on_play(self):
+        entry = self._selected_entry()
+        if entry and os.path.exists(entry.get('path', '')):
+            os.startfile(entry['path'])
+        elif entry:
+            QMessageBox.information(self, "情報", "ファイルが見つかりません。")
+
+    def on_redownload(self):
+        entry = self._selected_entry()
+        if not entry:
+            return
+        time_range = self.frame._current_time_range()
+        if time_range is None:
+            return
+        start_sec, end_sec = time_range
+        self.frame._dispatch_add(entry['url'], start_sec, end_sec)
         self.accept()
 
 
@@ -882,6 +1186,27 @@ class SettingsDialog(QDialog):
         self.clipboard_cb = QCheckBox("クリップボードを監視してURLを自動入力")
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
+        cookie_row = QHBoxLayout()
+        cookie_row.addWidget(QLabel("ブラウザCookie（年齢制限など用）"))
+        self.cookies_combo = QComboBox()
+        self.cookies_combo.addItems(["使用しない", "Chrome", "Edge", "Firefox"])
+        cookie_values = ["", "chrome", "edge", "firefox"]
+        current_cookie = self.config.get("cookies_browser", "")
+        self.cookies_combo.setCurrentIndex(
+            cookie_values.index(current_cookie) if current_cookie in cookie_values else 0)
+        cookie_row.addWidget(self.cookies_combo)
+        cookie_row.addStretch()
+        general_layout.addLayout(cookie_row)
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("cookies.txt（指定時は優先）"))
+        self.cookies_file_ctrl = QLineEdit()
+        self.cookies_file_ctrl.setText(self.config.get("cookies_file", ""))
+        self.cookies_file_ctrl.setPlaceholderText("cookies.txt のパス（任意）")
+        file_row.addWidget(self.cookies_file_ctrl, 1)
+        browse_cookie_btn = QPushButton("選択")
+        browse_cookie_btn.clicked.connect(self.on_browse_cookies_file)
+        file_row.addWidget(browse_cookie_btn)
+        general_layout.addLayout(file_row)
         general_layout.addStretch()
         tabs.addTab(general_tab, "一般")
 
@@ -911,6 +1236,12 @@ class SettingsDialog(QDialog):
         if path:
             self.folder_ctrl.setText(path)
 
+    def on_browse_cookies_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "cookies.txt を選択", "", "テキストファイル (*.txt);;すべてのファイル (*.*)")
+        if path:
+            self.cookies_file_ctrl.setText(path)
+
     def get_config(self):
         self.config["output_format"] = self.fmt_combo.currentText()
         self.config["bitrate"] = self.br_combo.currentText()
@@ -922,6 +1253,8 @@ class SettingsDialog(QDialog):
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
+        self.config["cookies_browser"] = ["", "chrome", "edge", "firefox"][self.cookies_combo.currentIndex()]
+        self.config["cookies_file"] = self.cookies_file_ctrl.text().strip()
         self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
 

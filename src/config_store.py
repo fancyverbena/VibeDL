@@ -17,6 +17,8 @@ DEFAULT_CONFIG = {
     "clipboard_monitor": False,
     "url_history": [],
     "name_template": "{title}",
+    "cookies_browser": "",
+    "cookies_file": "",
 }
 
 # config key -> (registry value name, kind)
@@ -32,6 +34,8 @@ _KEY_MAP = {
     "notify_toast": ("NotifyToast", "bool"),
     "clipboard_monitor": ("ClipboardMonitor", "bool"),
     "name_template": ("NameTemplate", "str"),
+    "cookies_browser": ("CookiesBrowser", "str"),
+    "cookies_file": ("CookiesFile", "str"),
 }
 
 
@@ -88,3 +92,27 @@ def save_config(config):
         history = config.get("url_history", [])
         winreg.SetValueEx(key, "UrlHistory", 0, winreg.REG_SZ,
                           json.dumps(list(history)[:10], ensure_ascii=False))
+
+
+def load_download_history():
+    """ダウンロード履歴（完了したファイルの一覧）を読み込む。最大50件。"""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+    except FileNotFoundError:
+        return []
+    with key:
+        try:
+            raw = winreg.QueryValueEx(key, "DownloadHistory")[0]
+            data = json.loads(raw)
+        except (FileNotFoundError, TypeError, ValueError):
+            return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict)][:50]
+
+
+def save_download_history(entries):
+    """ダウンロード履歴を保存する。最大50件。"""
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_WRITE) as key:
+        winreg.SetValueEx(key, "DownloadHistory", 0, winreg.REG_SZ,
+                          json.dumps(list(entries)[:50], ensure_ascii=False))
