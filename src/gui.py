@@ -10,6 +10,7 @@ from audio_processor import (
     normalize_audio, embed_metadata,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg
 )
+from config_store import get_config, save_config
 
 def create_gear_bitmap(size=24, color=wx.Colour(80, 80, 80)):
     bitmap = wx.Bitmap(size, size)
@@ -122,20 +123,10 @@ class VibeDLFrame(wx.Frame):
     def __init__(self):
         super().__init__(None, title="VibeDL - Audio Downloader", size=(850, 650))
         self.ffmpeg_info = get_ffmpeg_info()
-        self.config = {
-            "target_lufs": -14.0,
-            "output_folder": os.path.join(os.path.expanduser("~"), "downloads"),
-            "output_format": "mp3",
-            "bitrate": "256k",
-            "normalize": True,
-            "embed_metadata": True,
-            "dark_mode": False,
-            "notify_sound": True,
-            "notify_toast": True,
-            "clipboard_monitor": False,
-            "url_history": [],
-            "name_template": "{title}"
-        }
+        # 設定はレジストリから読み込む（CLI版と共通）。
+        # 以前は起動ごとの初期値で、設定も履歴も保存されなかった。
+        self.config = get_config()
+        self.Bind(wx.EVT_CLOSE, self.on_close)
         self.queue = []
         self.active_workers = []
         self.max_workers = 2
@@ -261,6 +252,11 @@ class VibeDLFrame(wx.Frame):
             history = history[:10]
         self.config["url_history"] = history
         self._populate_url_history()
+        save_config(self.config)
+
+    def on_close(self, event):
+        save_config(self.config)
+        event.Skip()
 
     def update_clipboard_monitor(self):
         if self.config.get("clipboard_monitor", False):
@@ -454,6 +450,7 @@ class VibeDLFrame(wx.Frame):
         dlg = SettingsDialog(self, self.config)
         if dlg.ShowModal() == wx.ID_OK:
             self.config = dlg.GetConfig()
+            save_config(self.config)
             self.apply_theme()
             self.update_settings_display()
             self.update_clipboard_monitor()

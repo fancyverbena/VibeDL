@@ -1,51 +1,15 @@
 import os
 import sys
-import winreg
 from downloader import download_audio, download_playlist
 from audio_processor import (
     normalize_audio, embed_metadata,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg
 )
-
-REG_PATH = r"Software\VibeDL"
+from config_store import get_config, save_config
 
 if os.name != 'nt':
     print("このアプリケーションはWindows専用です。")
     sys.exit(1)
-
-def get_config():
-    config = {
-        "target_lufs": -14.0,
-        "output_folder": "downloads",
-        "output_format": "mp3",
-        "bitrate": "256k",
-        "normalize": True,
-        "embed_metadata": True
-    }
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH) as key:
-            config["target_lufs"] = float(winreg.QueryValueEx(key, "TargetLUFS")[0])
-            config["output_folder"] = winreg.QueryValueEx(key, "OutputFolder")[0]
-            config["output_format"] = winreg.QueryValueEx(key, "OutputFormat")[0]
-            config["bitrate"] = winreg.QueryValueEx(key, "Bitrate")[0]
-            config["normalize"] = winreg.QueryValueEx(key, "Normalize")[0] == "True"
-            config["embed_metadata"] = winreg.QueryValueEx(key, "EmbedMetadata")[0] == "True"
-    except FileNotFoundError:
-        pass
-    except (TypeError, ValueError) as e:
-        print(f"設定ファイルに問題があります: {e}。デフォルト値で動作します。")
-    return config
-
-def save_config(config):
-    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_WRITE) as key:
-        winreg.SetValueEx(key, "TargetLUFS", 0, winreg.REG_SZ, str(config["target_lufs"]))
-        absolute_folder = os.path.abspath(config["output_folder"])
-        winreg.SetValueEx(key, "OutputFolder", 0, winreg.REG_SZ, absolute_folder)
-        config["output_folder"] = absolute_folder
-        winreg.SetValueEx(key, "OutputFormat", 0, winreg.REG_SZ, config["output_format"])
-        winreg.SetValueEx(key, "Bitrate", 0, winreg.REG_SZ, config["bitrate"])
-        winreg.SetValueEx(key, "Normalize", 0, winreg.REG_SZ, str(config["normalize"]))
-        winreg.SetValueEx(key, "EmbedMetadata", 0, winreg.REG_SZ, str(config["embed_metadata"]))
 
 def progress_hook(d):
     if d['status'] == 'downloading':
@@ -86,6 +50,11 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
     )
 
     if not config["normalize"] and not config["embed_metadata"]:
+        # 後処理が無い場合も、必ず最終ファイル名へリネームしてから
+        # 保存先を表示する（以前は実ファイルと表示が食い違っていた）。
+        if os.path.exists(data['dest_path']):
+            os.remove(data['dest_path'])
+        os.rename(data['temp_raw'], data['dest_path'])
         print("\n✨ ダウンロードが完了しました（後処理なし）。")
         print(f"保存先: {data['dest_path']}")
         return
