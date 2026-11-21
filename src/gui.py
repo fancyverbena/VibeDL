@@ -13,12 +13,12 @@ from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
     QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
     QProgressDialog, QPushButton, QTabWidget, QVBoxLayout, QWidget,
     QSystemTrayIcon,
 )
 
-from downloader import download_audio
+from downloader import download_audio, search_youtube
 from audio_processor import (
     normalize_audio, embed_metadata,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
@@ -226,6 +226,30 @@ class FFmpegDownloadThread(QThread):
         self.done.emit(path)
 
 
+def format_duration(seconds):
+    if not seconds:
+        return "--:--"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+class SearchWorker(QThread):
+    results = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, keyword, parent=None):
+        super().__init__(parent)
+        self.keyword = keyword
+
+    def run(self):
+        try:
+            self.results.emit(search_youtube(self.keyword))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 def make_card():
     card = QFrame()
     card.setObjectName("card")
@@ -299,6 +323,10 @@ class VibeDLFrame(QMainWindow):
         self.url_ctrl.lineEdit().returnPressed.connect(self.on_add_to_queue)
         self._populate_url_history()
         url_row.addWidget(self.url_ctrl, 1)
+        self.search_btn = QPushButton("検索")
+        self.search_btn.setToolTip("キーワードでYouTubeを検索")
+        self.search_btn.clicked.connect(self.on_search)
+        url_row.addWidget(self.search_btn)
         card_layout.addLayout(url_row)
 
         time_row = QHBoxLayout()
@@ -472,11 +500,8 @@ class VibeDLFrame(QMainWindow):
         thread.wait()
 
     # ---------- キュー処理 ----------
-    def on_add_to_queue(self):
-        url = self.url_ctrl.currentText().strip()
-        if not url:
-            QMessageBox.warning(self, "入力エラー", "URLを入力してください。")
-            return
+    def _current_time_range(self):
+        """開始・終了欄を検証して (start, end) を返す。不正なら警告して None。"""
         try:
             start_sec = parse_time(self.start_ctrl.text())
             end_sec = parse_time(self.end_ctrl.text())
@@ -484,10 +509,38 @@ class VibeDLFrame(QMainWindow):
             QMessageBox.warning(
                 self, "入力エラー",
                 "開始・終了は「秒」または「mm:ss」で入力してください。")
-            return
+            return None
         if start_sec is not None and end_sec is not None and end_sec <= start_sec:
             QMessageBox.warning(self, "入力エラー", "終了は開始より後を指定してください。")
+            return None
+        return (start_sec, end_sec)
+
+    def on_search(self):
+        dlg = SearchDialog(self)
+        if dlg.exec() != QDialog.Accepted:
             return
+        urls = dlg.selected_urls()
+        if not urls:
+            return
+        time_range = self._current_time_range()
+        if time_range is None:
+            return
+        start_sec, end_sec = time_range
+        for url in urls:
+            self.queue.append(QueueItem(url, start_sec, end_sec))
+            self.add_to_history(url)
+            self.log(f"キューに追加: {url}")
+        self.update_queue_display()
+
+    def on_add_to_queue(self):
+        url = self.url_ctrl.currentText().strip()
+        if not url:
+            QMessageBox.warning(self, "入力エラー", "URLを入力してください。")
+            return
+        time_range = self._current_time_range()
+        if time_range is None:
+            return
+        start_sec, end_sec = time_range
         item = QueueItem(url, start_sec, end_sec)
         self.queue.append(item)
         self.update_queue_display()
@@ -573,6 +626,92 @@ class VibeDLFrame(QMainWindow):
     def closeEvent(self, event):
         save_config(self.config)
         super().closeEvent(event)
+
+
+class SearchDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("YouTube検索")
+        self.resize(660, 480)
+        self._thread = None
+
+        layout = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.keyword_ctrl = QLineEdit()
+        self.keyword_ctrl.setPlaceholderText("キーワードを入力")
+        self.keyword_ctrl.returnPressed.connect(self.on_search)
+        row.addWidget(self.keyword_ctrl, 1)
+        self.search_btn = QPushButton("検索")
+        self.search_btn.clicked.connect(self.on_search)
+        row.addWidget(self.search_btn)
+        layout.addLayout(row)
+
+        self.status_label = QLabel("キーワードを入力して検索してください（最大10件）")
+        self.status_label.setObjectName("muted")
+        layout.addWidget(self.status_label)
+
+        self.results_list = QListWidget()
+        self.results_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.results_list.itemDoubleClicked.connect(self.on_double_click)
+        layout.addWidget(self.results_list, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        add_btn = QPushButton("選択をキューに追加")
+        add_btn.setObjectName("primary")
+        add_btn.clicked.connect(self.on_add_selected)
+        btn_row.addWidget(add_btn)
+        close_btn = QPushButton("閉じる")
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        self.keyword_ctrl.setFocus()
+
+    def on_search(self):
+        keyword = self.keyword_ctrl.text().strip()
+        if not keyword:
+            return
+        self.search_btn.setEnabled(False)
+        self.status_label.setText("検索中...")
+        self.results_list.clear()
+        self._thread = SearchWorker(keyword, self)
+        self._thread.results.connect(self.on_results)
+        self._thread.failed.connect(self.on_failed)
+        self._thread.start()
+
+    def on_results(self, results):
+        self.search_btn.setEnabled(True)
+        for r in results:
+            text = r['title']
+            if r['uploader']:
+                text += f"  ―  {r['uploader']}"
+            text += f"  ({format_duration(r['duration'])})"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, r['url'])
+            self.results_list.addItem(item)
+        if results:
+            self.status_label.setText(f"{len(results)}件見つかりました。複数選択もできます")
+        else:
+            self.status_label.setText("見つかりませんでした")
+
+    def on_failed(self, message):
+        self.search_btn.setEnabled(True)
+        self.status_label.setText(f"検索に失敗しました: {message}")
+
+    def selected_urls(self):
+        return [item.data(Qt.UserRole) for item in self.results_list.selectedItems()]
+
+    def on_add_selected(self):
+        if not self.selected_urls():
+            QMessageBox.information(self, "情報", "結果を選択してください。")
+            return
+        self.accept()
+
+    def on_double_click(self, item):
+        self.results_list.clearSelection()
+        item.setSelected(True)
+        self.accept()
 
 
 class SettingsDialog(QDialog):
