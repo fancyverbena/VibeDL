@@ -136,6 +136,7 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         'postprocessor_args': [],
         **_cookie_opts(cookies_browser, cookies_file),
         'js_runtimes': JS_RUNTIMES,
+        'remote_components': ['ejs:github'],
     }
 
     # 自動ダウンロード／同梱された FFmpeg を yt-dlp の変換にも使う。
@@ -277,6 +278,7 @@ def get_video_info(url, cookies_browser=None, cookies_file=None):
         'skip_download': True,
         **_cookie_opts(cookies_browser, cookies_file),
         'js_runtimes': JS_RUNTIMES,
+        'remote_components': ['ejs:github'],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
