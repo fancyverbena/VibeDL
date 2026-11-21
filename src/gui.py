@@ -348,6 +348,7 @@ class DownloadWorker(QThread):
             )
             self.log.emit(tr("log_dl_done"))
             temp_out = data['temp_raw']
+            intermediates = [data['temp_raw']]
 
             self._check_cancelled()
             if (self.config.get("trim_silence") or self.config.get("fade_enabled")) \
@@ -362,6 +363,7 @@ class DownloadWorker(QThread):
                     fade_sec=fade_sec,
                     ffmpeg_info=self.ffmpeg_info)
                 if trimmed:
+                    intermediates.append(temp_out)
                     temp_out = trimmed
                     self.log.emit(tr("log_trim_done"))
                 else:
@@ -375,6 +377,7 @@ class DownloadWorker(QThread):
                     ffmpeg_info=self.ffmpeg_info,
                     bitrate=self.config["bitrate"])
                 if normalized:
+                    intermediates.append(temp_out)
                     temp_out = normalized
                     self.log.emit(tr("log_normalize_done"))
                 else:
@@ -396,8 +399,13 @@ class DownloadWorker(QThread):
                 os.remove(data['dest_path'])
             os.rename(temp_out, data['dest_path'])
 
-            if os.path.exists(data['temp_raw']) and data['temp_raw'] != temp_out:
-                os.remove(data['temp_raw'])
+            # 中間ファイル（元ファイル、_trim / _tmp 等）を残さない
+            for path in intermediates:
+                if path != data['dest_path'] and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
 
             self.log.emit(tr("log_complete", path=data['dest_path']))
             self.item_finished.emit(self.item, data['dest_path'])
