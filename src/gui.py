@@ -144,19 +144,34 @@ class QueueItem:
         self.status = "waiting"
 
 
+class DownloadCancelled(Exception):
+    """キャンセル要求時にダウンロードを中断するための例外。"""
+
+
 class DownloadWorker(QThread):
     log = Signal(str)
     progress = Signal(int, str, str)  # percent, speed, eta
     phase = Signal(str)
     item_finished = Signal(object, object)  # item, dest_path or None
+    item_cancelled = Signal(object)  # item
 
     def __init__(self, item, config, ffmpeg_info, parent=None):
         super().__init__(parent)
         self.item = item
         self.config = config
         self.ffmpeg_info = ffmpeg_info
+        self._cancel_requested = False
+
+    def cancel(self):
+        self._cancel_requested = True
+
+    def _check_cancelled(self):
+        if self._cancel_requested:
+            raise DownloadCancelled()
 
     def _progress_hook(self, d):
+        # ダウンロード中は進捗コールバックのたびにキャンセルを確認する
+        self._check_cancelled()
         if d.get('status') == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate')
             downloaded = d.get('downloaded_bytes', 0)
@@ -183,6 +198,7 @@ class DownloadWorker(QThread):
             self.log.emit("[1/3] ダウンロード完了")
             temp_out = data['temp_raw']
 
+            self._check_cancelled()
             if self.config["normalize"] and check_ffmpeg(self.ffmpeg_info['path']):
                 self.phase.emit("音量最適化中...")
                 self.log.emit("[2/3] 音量最適化中...")
@@ -197,6 +213,7 @@ class DownloadWorker(QThread):
             else:
                 self.log.emit("音量正規化をスキップ")
 
+            self._check_cancelled()
             if self.config["embed_metadata"]:
                 self.phase.emit("メタデータ埋め込み中...")
                 self.log.emit("[3/3] メタデータ埋め込み中...")
@@ -211,9 +228,35 @@ class DownloadWorker(QThread):
 
             self.log.emit(f"✨ 完了: {data['dest_path']}")
             self.item_finished.emit(self.item, data['dest_path'])
+        except DownloadCancelled:
+            self._handle_cancelled(data if 'data' in locals() else None,
+                                   temp_out if 'temp_out' in locals() else None)
         except Exception as e:
-            self.log.emit(f"❌ エラー ({self.item.url}): {e}")
-            self.item_finished.emit(self.item, None)
+            # yt-dlpがフック内例外を包んで返す場合も、キャンセル要求が
+            # 立っていればエラーではなくキャンセルとして扱う
+            if self._cancel_requested:
+                self._handle_cancelled(data if 'data' in locals() else None,
+                                       temp_out if 'temp_out' in locals() else None)
+            else:
+                self.log.emit(f"❌ エラー ({self.item.url}): {e}")
+                self.item_finished.emit(self.item, None)
+
+    def _handle_cancelled(self, data, temp_out):
+        # ダウンロード後にキャンセルされた場合は中間ファイルを掃除する
+        # （ダウンロード中の .part ファイルは対象外）
+        candidates = set()
+        if data:
+            candidates.add(data.get('temp_raw'))
+        if temp_out:
+            candidates.add(temp_out)
+        for path in candidates:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        self.log.emit(f"⏹ キャンセルしました: {self.item.url}")
+        self.item_cancelled.emit(self.item)
 
 
 class FFmpegDownloadThread(QThread):
@@ -356,6 +399,11 @@ class VibeDLFrame(QMainWindow):
         self.clear_queue_btn = QPushButton("キューをクリア")
         self.clear_queue_btn.clicked.connect(self.on_clear_queue)
         btn_row.addWidget(self.clear_queue_btn)
+        self.cancel_btn = QPushButton("キャンセル")
+        self.cancel_btn.setToolTip("実行中のダウンロードをすべてキャンセル")
+        self.cancel_btn.clicked.connect(self.on_cancel_downloads)
+        self.cancel_btn.setEnabled(False)
+        btn_row.addWidget(self.cancel_btn)
         btn_row.addStretch()
         self.open_folder_btn = QPushButton("フォルダを開く")
         self.open_folder_btn.setToolTip("最後に保存したフォルダを開く")
@@ -579,9 +627,32 @@ class VibeDLFrame(QMainWindow):
             worker.progress.connect(self.on_download_progress)
             worker.phase.connect(self.set_status_label)
             worker.item_finished.connect(self.on_item_completed)
+            worker.item_cancelled.connect(self.on_item_cancelled)
             self.active_workers.append(worker)
+            self.cancel_btn.setEnabled(True)
             self.update_queue_display()
             worker.start()
+
+    def on_cancel_downloads(self):
+        if not self.active_workers:
+            return
+        for worker in list(self.active_workers):
+            worker.cancel()
+        self.cancel_btn.setEnabled(False)
+        self.log("キャンセルを要求しました（ダウンロード中はすぐ、変換・音量調整中は工程の合間で止まります）")
+
+    def on_item_cancelled(self, item):
+        if item in self.queue:
+            self.queue.remove(item)
+        sender = self.sender()
+        if sender in self.active_workers:
+            self.active_workers.remove(sender)
+        self.update_queue_display()
+        if any(i.status == "waiting" for i in self.queue):
+            self.start_queue()
+        elif not self.active_workers:
+            self.cancel_btn.setEnabled(False)
+            self.status_label.setText("キャンセルしました")
 
     def on_item_completed(self, item, dest_path):
         if item in self.queue:
@@ -598,6 +669,7 @@ class VibeDLFrame(QMainWindow):
         if any(i.status == "waiting" for i in self.queue):
             self.start_queue()
         elif not self.active_workers:
+            self.cancel_btn.setEnabled(False)
             self.progress.setValue(100)
             self.status_label.setText("完了")
 
