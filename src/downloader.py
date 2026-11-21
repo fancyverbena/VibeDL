@@ -44,6 +44,22 @@ def format_time(seconds):
             parts += f"{s}s"
         return parts
 
+# リトライしても直らない恒常エラーの判別パターン（yt-dlpのメッセージ）
+PERMANENT_ERROR_PATTERNS = (
+    "video is not available",
+    "video unavailable",
+    "this video is no longer available",
+    "private video",
+    "video is private",
+    "age-restricted",
+    "sign in to confirm your age",
+    "account associated with this video has been terminated",
+)
+
+def is_permanent_error(exc):
+    message = str(exc).lower()
+    return any(pattern in message for pattern in PERMANENT_ERROR_PATTERNS)
+
 def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}"):
     output_dir = os.path.abspath(output_dir)
     if not os.path.exists(output_dir):
@@ -139,6 +155,14 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
                     'thumb': info.get('thumbnail')
                 }
         except Exception as e:
+            if is_permanent_error(e):
+                # 待っても直らないエラーはリトライせず、理由を添えて即終了する。
+                # 検索（flat）では利用可否が分からないため、検索結果にも
+                # 利用不可の動画が混ざることがある。
+                raise Exception(
+                    "この動画は利用できませんでした"
+                    "（地域制限・削除・非公開・年齢制限などの可能性があります）"
+                ) from e
             if attempt < 2:
                 print(f"\n⚠️ エラーが発生しました: {e}")
                 print(f"再試行中...({attempt+2}/3)")
