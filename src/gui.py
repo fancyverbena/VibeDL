@@ -48,6 +48,7 @@ TEXTS = {
     "log_normalize_skip": {"ja": "音量正規化をスキップ", "en": "Skipping volume normalization"},
     "phase_metadata": {"ja": "メタデータ埋め込み中...", "en": "Embedding metadata..."},
     "log_metadata": {"ja": "[3/3] メタデータ埋め込み中...", "en": "[3/3] Embedding metadata..."},
+    "log_metadata_failed": {"ja": "⚠ メタデータの埋め込みに失敗しました（ファイルはそのまま保存します）: {err}", "en": "⚠ Failed to embed metadata (saving the file as-is): {err}"},
     "log_complete": {"ja": "✨ 完了: {path}", "en": "✨ Done: {path}"},
     "log_error": {"ja": "❌ エラー ({url}): {err}", "en": "❌ Error ({url}): {err}"},
     "log_cancelled": {"ja": "⏹ キャンセルしました: {url}", "en": "⏹ Cancelled: {url}"},
@@ -385,7 +386,11 @@ class DownloadWorker(QThread):
             if self.config["embed_metadata"]:
                 self.phase.emit(tr("phase_metadata"))
                 self.log.emit(tr("log_metadata"))
-                embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
+                try:
+                    embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
+                except Exception as e:
+                    # メタデータ失敗で完成したファイルまで失わない
+                    self.log.emit(tr("log_metadata_failed", err=e))
 
             if os.path.exists(data['dest_path']):
                 os.remove(data['dest_path'])

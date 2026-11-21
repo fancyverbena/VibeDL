@@ -73,7 +73,11 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
 
     if config["embed_metadata"]:
         print("[3/3] メタデータを埋め込み中...")
-        embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
+        try:
+            embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
+        except Exception as e:
+            # メタデータ失敗で完成したファイルまで失わない
+            print(f"⚠ メタデータの埋め込みに失敗しました（ファイルはそのまま保存します）: {e}")
 
     if os.path.exists(data['dest_path']):
         os.remove(data['dest_path'])

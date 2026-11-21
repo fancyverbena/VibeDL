@@ -12,6 +12,7 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC, TPE1, TIT2, TALB, ID3NoHeaderError
 from mutagen.mp4 import MP4, MP4Cover
 from mutagen.flac import FLAC, Picture
+from mutagen.wave import WAVE
 
 FFMPEG_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
@@ -275,15 +276,45 @@ def trim_and_fade(input_path, trim_silence=False, fade_sec=0.0, ffmpeg_info=None
             os.remove(output_path)
         return None
 
+def _fetch_thumbnail(thumb_url):
+    """サムネイルを取得し、(bytes, mime) を返す。失敗時は (None, None)。
+
+    ステータスコードと画像形式（マジックバイト）を確認し、エラーページ等
+    のHTMLをカバー画像として埋め込んでしまう事故を防ぐ。
+    """
+    if not thumb_url:
+        return None, None
+    try:
+        resp = requests.get(thumb_url, timeout=10)
+        resp.raise_for_status()
+        data = resp.content
+        if not data or len(data) > 5 * 1024 * 1024:
+            return None, None
+        if data[:3] == b'\xff\xd8\xff':
+            return data, 'image/jpeg'
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            return data, 'image/png'
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return data, 'image/webp'
+    except requests.exceptions.RequestException:
+        pass
+    return None, None
+
+
 def embed_metadata(file_path, title, artist, thumb_url):
     ext = os.path.splitext(file_path)[1].lower()
+    img_data, img_mime = _fetch_thumbnail(thumb_url)
 
-    if ext == '.mp3':
-        try:
-            audio = MP3(file_path, ID3=ID3)
-        except ID3NoHeaderError:
-            audio = MP3(file_path)
-            audio.add_tags()
+    if ext in ('.mp3', '.wav'):
+        # MP3 と WAV はどちらも ID3 タグで扱える
+        if ext == '.mp3':
+            try:
+                audio = MP3(file_path, ID3=ID3)
+            except ID3NoHeaderError:
+                audio = MP3(file_path)
+                audio.add_tags()
+        else:
+            audio = WAVE(file_path)
 
         if audio.tags is None:
             audio.add_tags()
@@ -292,14 +323,11 @@ def embed_metadata(file_path, title, artist, thumb_url):
         audio.tags.add(TPE1(encoding=3, text=artist))
         audio.tags.add(TALB(encoding=3, text="VibeDL"))
 
-        if thumb_url:
-            try:
-                img_data = requests.get(thumb_url, timeout=10).content
-                audio.tags.add(
-                    APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data)
-                )
-            except requests.exceptions.RequestException:
-                pass
+        if img_data:
+            audio.tags.add(
+                APIC(encoding=3, mime=img_mime, type=3, desc='Cover',
+                     data=img_data)
+            )
         audio.save()
 
     elif ext == '.m4a':
@@ -308,12 +336,11 @@ def embed_metadata(file_path, title, artist, thumb_url):
         audio['\xa9ART'] = artist
         audio['\xa9alb'] = 'VibeDL'
 
-        if thumb_url:
-            try:
-                img_data = requests.get(thumb_url, timeout=10).content
-                audio['covr'] = [MP4Cover(img_data, imageformat=MP4Cover.FORMAT_JPEG)]
-            except requests.exceptions.RequestException:
-                pass
+        # MP4 のカバーは JPEG / PNG のみ対応
+        if img_data and img_mime in ('image/jpeg', 'image/png'):
+            fmt = (MP4Cover.FORMAT_JPEG if img_mime == 'image/jpeg'
+                   else MP4Cover.FORMAT_PNG)
+            audio['covr'] = [MP4Cover(img_data, imageformat=fmt)]
         audio.save()
 
     elif ext == '.flac':
@@ -322,15 +349,11 @@ def embed_metadata(file_path, title, artist, thumb_url):
         audio['artist'] = artist
         audio['album'] = 'VibeDL'
 
-        if thumb_url:
-            try:
-                img_data = requests.get(thumb_url, timeout=10).content
-                pic = Picture()
-                pic.type = 3
-                pic.mime = 'image/jpeg'
-                pic.desc = 'Cover'
-                pic.data = img_data
-                audio.add_picture(pic)
-            except requests.exceptions.RequestException:
-                pass
+        if img_data:
+            pic = Picture()
+            pic.type = 3
+            pic.mime = img_mime
+            pic.desc = 'Cover'
+            pic.data = img_data
+            audio.add_picture(pic)
         audio.save()
