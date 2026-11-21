@@ -2,7 +2,6 @@ import wx
 import wx.adv
 import os
 import threading
-import math
 import winsound
 from downloader import download_audio
 from audio_processor import (
@@ -11,25 +10,89 @@ from audio_processor import (
 )
 from config_store import get_config, save_config
 
+ACCENT = wx.Colour(124, 92, 255)  # バイオレット（ブランドカラー）
+
+
 def get_palette(dark):
-    """テーマ色一式。ライトはOS標準色、ダークは固定パレット。"""
+    """テーマ色一式。bg（土台）より surface（カード）を一段明るくして奥行きを出す。"""
     if dark:
         return {
-            "bg": wx.Colour(45, 45, 48),
-            "fg": wx.Colour(241, 241, 241),
-            "entry_bg": wx.Colour(60, 60, 60),
-            "log_bg": wx.Colour(30, 30, 30),
-            "btn_bg": wx.Colour(85, 85, 85),
-            "icon_fg": wx.Colour(220, 220, 220),
+            "bg": wx.Colour(32, 34, 40),
+            "surface": wx.Colour(43, 46, 53),
+            "fg": wx.Colour(242, 242, 242),
+            "muted": wx.Colour(167, 171, 179),
+            "entry_bg": wx.Colour(28, 30, 35),
+            "log_bg": wx.Colour(24, 26, 30),
+            "btn_bg": wx.Colour(58, 62, 71),
+            "accent": ACCENT,
+            "accent_fg": wx.Colour(255, 255, 255),
+            "track": wx.Colour(58, 62, 71),
         }
     return {
-        "bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
-        "fg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT),
-        "entry_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
-        "log_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
-        "btn_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE),
-        "icon_fg": wx.Colour(80, 80, 80),
+        "bg": wx.Colour(233, 235, 239),
+        "surface": wx.Colour(255, 255, 255),
+        "fg": wx.Colour(28, 30, 34),
+        "muted": wx.Colour(110, 115, 122),
+        "entry_bg": wx.Colour(255, 255, 255),
+        "log_bg": wx.Colour(255, 255, 255),
+        "btn_bg": wx.Colour(255, 255, 255),
+        "accent": ACCENT,
+        "accent_fg": wx.Colour(255, 255, 255),
+        "track": wx.Colour(214, 217, 222),
     }
+
+
+class ProgressBar(wx.Panel):
+    """自前描画のプログレスバー。
+
+    標準の wx.Gauge はダークモードでも白い帯になって浮くため、
+    パレット色で角丸バーと％文字を描く。
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent, size=(-1, 22))
+        self._percent = 0
+        self._palette = get_palette(False)
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+
+    def set_palette(self, palette):
+        self._palette = palette
+        self.Refresh()
+
+    def SetValue(self, percent):
+        self._percent = max(0, min(100, int(percent)))
+        self.Refresh()
+
+    def GetValue(self):
+        return self._percent
+
+    def _on_paint(self, event):
+        dc = wx.PaintDC(self)
+        dc.SetBackground(wx.Brush(self.GetParent().GetBackgroundColour()))
+        dc.Clear()
+        w, h = self.GetSize()
+        if w <= 0 or h <= 0:
+            return
+        track = self._palette["track"]
+        dc.SetBrush(wx.Brush(track))
+        dc.SetPen(wx.Pen(track))
+        dc.DrawRoundedRectangle(0, 0, w, h, 6)
+        if self._percent > 0:
+            fill_w = max(h, int(w * self._percent / 100))
+            accent = self._palette["accent"]
+            dc.SetBrush(wx.Brush(accent))
+            dc.SetPen(wx.Pen(accent))
+            dc.DrawRoundedRectangle(0, 0, fill_w, h, 6)
+        font = wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        dc.SetFont(font)
+        text = f"{self._percent}%"
+        tw, th = dc.GetTextExtent(text)
+        # 中央が塗りの上なら白文字、トラックの上なら通常色
+        if self._percent >= 50:
+            dc.SetTextForeground(self._palette["accent_fg"])
+        else:
+            dc.SetTextForeground(self._palette["fg"])
+        dc.DrawText(text, (w - tw) // 2, (h - th) // 2)
 
 
 def apply_theme_recursive(window, dark, accent_controls=()):
@@ -59,55 +122,17 @@ def apply_theme_recursive(window, dark, accent_controls=()):
 
 def make_section_label(parent, text):
     label = wx.StaticText(parent, label=text)
-    font = label.GetFont()
-    font.SetWeight(wx.FONTWEIGHT_BOLD)
-    label.SetFont(font)
+    label.SetFont(wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+    label.SetForegroundColour(ACCENT)
     return label
 
 
-def create_gear_bitmap(size=24, color=wx.Colour(80, 80, 80), bg=None):
-    if bg is None:
-        bg = wx.Colour(240, 240, 240)
-    bitmap = wx.Bitmap(size, size)
-    mdc = wx.MemoryDC(bitmap)
-    mdc.SetBackground(wx.Brush(bg))
-    mdc.Clear()
-    gc = wx.GraphicsContext.Create(mdc)
-    gc.SetPen(wx.Pen(color, 2))
-    gc.SetBrush(wx.Brush(color))
-    cx, cy = size/2, size/2
-    r_outer = size/2 - 3
-    r_inner = r_outer - 5
-    gc.DrawEllipse(cx - r_outer, cy - r_outer, r_outer*2, r_outer*2)
-    gc.SetBrush(wx.Brush(bg))
-    gc.DrawEllipse(cx - r_inner, cy - r_inner, r_inner*2, r_inner*2)
-    gc.SetBrush(wx.Brush(color))
-    tooth_w = 4
-    tooth_h = 6
-    for angle in range(0, 360, 45):
-        rad = angle * math.pi / 180
-        tx = cx + (r_outer - 1) * math.cos(rad) - tooth_w/2
-        ty = cy + (r_outer - 1) * math.sin(rad) - tooth_h/2
-        gc.DrawRectangle(tx, ty, tooth_w, tooth_h)
-    del gc
-    mdc.SelectObject(wx.NullBitmap)
-    return bitmap
-
-def create_folder_bitmap(size=24, color=wx.Colour(80, 80, 80), bg=None):
-    if bg is None:
-        bg = wx.Colour(240, 240, 240)
-    bitmap = wx.Bitmap(size, size)
-    mdc = wx.MemoryDC(bitmap)
-    mdc.SetBackground(wx.Brush(bg))
-    mdc.Clear()
-    gc = wx.GraphicsContext.Create(mdc)
-    gc.SetPen(wx.Pen(color, 2))
-    gc.SetBrush(wx.Brush(color))
-    gc.DrawRectangle(2, size/3, size-4, size*2/3-2)
-    gc.DrawRectangle(2, size/3, size/2, size/6)
-    del gc
-    mdc.SelectObject(wx.NullBitmap)
-    return bitmap
+def make_card(parent):
+    """カード型の土台パネルと、その内側サイザーを返す。"""
+    card = wx.Panel(parent)
+    sizer = wx.BoxSizer(wx.VERTICAL)
+    card.SetSizer(sizer)
+    return card, sizer
 
 
 class QueueItem:
@@ -213,109 +238,102 @@ class VibeDLFrame(wx.Frame):
 
     def init_ui(self):
         self.panel = wx.Panel(self)
+        self.panel.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         main_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._cards = []
+
+        # --- カード1: 入力 + 操作ボタン ---
+        card, card_sizer = make_card(self.panel)
+        self._cards.append(card)
+        card_sizer.Add(make_section_label(card, "ダウンロード"), 0, wx.ALL, 12)
 
         input_sizer = wx.FlexGridSizer(rows=3, cols=2, vgap=10, hgap=10)
         input_sizer.AddGrowableCol(1, 1)
 
-        url_label = wx.StaticText(self.panel, label="YouTube URL:")
-        self.url_ctrl = wx.ComboBox(self.panel, style=wx.CB_DROPDOWN | wx.TE_PROCESS_ENTER)
+        url_label = wx.StaticText(card, label="YouTube URL:")
+        self.url_ctrl = wx.ComboBox(card, style=wx.CB_DROPDOWN | wx.TE_PROCESS_ENTER, size=(-1, 30))
         self.url_ctrl.SetHint("https://www.youtube.com/...")
         self.url_ctrl.Bind(wx.EVT_TEXT_ENTER, self.on_add_to_queue)
         self._populate_url_history()
         input_sizer.Add(url_label, 0, wx.ALIGN_CENTER_VERTICAL)
         input_sizer.Add(self.url_ctrl, 1, wx.EXPAND)
 
-        start_label = wx.StaticText(self.panel, label="開始 (秒 / mm:ss):")
-        start_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.start_ctrl = wx.TextCtrl(self.panel, size=(100, -1))
+        start_label = wx.StaticText(card, label="開始 (秒 / mm:ss):")
+        self.start_ctrl = wx.TextCtrl(card, size=(110, 28))
         self.start_ctrl.SetHint("0:00")
-        start_sizer.Add(self.start_ctrl, 0)
-        start_sizer.AddStretchSpacer()
         input_sizer.Add(start_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        input_sizer.Add(start_sizer, 1, wx.EXPAND)
+        input_sizer.Add(self.start_ctrl, 0)
 
-        end_label = wx.StaticText(self.panel, label="終了 (秒 / mm:ss):")
-        end_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.end_ctrl = wx.TextCtrl(self.panel, size=(100, -1))
+        end_label = wx.StaticText(card, label="終了 (秒 / mm:ss):")
+        self.end_ctrl = wx.TextCtrl(card, size=(110, 28))
         self.end_ctrl.SetHint("3:00")
-        end_sizer.Add(self.end_ctrl, 0)
-        end_sizer.AddStretchSpacer()
         input_sizer.Add(end_label, 0, wx.ALIGN_CENTER_VERTICAL)
-        input_sizer.Add(end_sizer, 1, wx.EXPAND)
+        input_sizer.Add(self.end_ctrl, 0)
 
-        main_sizer.Add(make_section_label(self.panel, "ダウンロード"), 0, wx.LEFT | wx.TOP, 12)
-        main_sizer.Add(input_sizer, 0, wx.EXPAND | wx.ALL, 12)
+        card_sizer.Add(input_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
 
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        self.add_queue_btn = wx.Button(self.panel, label="キューに追加", size=(140, 32))
+        self.add_queue_btn = wx.Button(card, label="キューに追加", size=(140, 36))
         self.add_queue_btn.Bind(wx.EVT_BUTTON, self.on_add_to_queue)
         btn_sizer.Add(self.add_queue_btn, 0, wx.ALIGN_CENTER_VERTICAL)
 
-        self.start_queue_btn = wx.Button(self.panel, label="キューを開始", size=(140, 32))
-        self.start_queue_btn.SetBackgroundColour(wx.Colour(0, 150, 0))
+        self.start_queue_btn = wx.Button(card, label="キューを開始", size=(140, 36))
+        self.start_queue_btn.SetBackgroundColour(ACCENT)
         self.start_queue_btn.SetForegroundColour(wx.Colour(255, 255, 255))
+        start_font = self.start_queue_btn.GetFont()
+        start_font.SetWeight(wx.FONTWEIGHT_BOLD)
+        self.start_queue_btn.SetFont(start_font)
         self.start_queue_btn.Bind(wx.EVT_BUTTON, self.on_start_queue)
         self.start_queue_btn.Enable(False)
         btn_sizer.Add(self.start_queue_btn, 0, wx.LEFT, 10)
 
-        self.clear_queue_btn = wx.Button(self.panel, label="キューをクリア", size=(120, 32))
+        self.clear_queue_btn = wx.Button(card, label="キューをクリア", size=(120, 36))
         self.clear_queue_btn.Bind(wx.EVT_BUTTON, self.on_clear_queue)
         btn_sizer.Add(self.clear_queue_btn, 0, wx.LEFT, 10)
 
         btn_sizer.AddStretchSpacer()
 
-        gear_bmp = create_gear_bitmap()
-        folder_bmp = create_folder_bitmap()
-
-        self.open_folder_btn = wx.BitmapButton(self.panel, bitmap=folder_bmp, size=(32, 32))
+        self.open_folder_btn = wx.Button(card, label="フォルダを開く", size=(120, 36))
         self.open_folder_btn.SetToolTip("最後に保存したフォルダを開く")
         self.open_folder_btn.Bind(wx.EVT_BUTTON, self.on_open_folder)
         self.open_folder_btn.Enable(False)
-        btn_sizer.Add(self.open_folder_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 12)
+        btn_sizer.Add(self.open_folder_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
 
-        self.settings_btn = wx.BitmapButton(self.panel, bitmap=gear_bmp, size=(32, 32))
-        self.settings_btn.SetToolTip("設定")
+        self.settings_btn = wx.Button(card, label="設定", size=(80, 36))
         self.settings_btn.Bind(wx.EVT_BUTTON, self.on_settings)
-        btn_sizer.Add(self.settings_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 12)
+        btn_sizer.Add(self.settings_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
 
-        main_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
+        card_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.ALL, 12)
+        main_sizer.Add(card, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
-        main_sizer.Add(make_section_label(self.panel, "キュー"), 0, wx.LEFT | wx.BOTTOM, 12)
-        self.queue_list = wx.ListBox(self.panel, size=(-1, 100))
-        main_sizer.Add(self.queue_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        # --- カード2: キュー + 進捗 ---
+        card2, card2_sizer = make_card(self.panel)
+        self._cards.append(card2)
+        card2_sizer.Add(make_section_label(card2, "キュー"), 0, wx.ALL, 12)
+        self.queue_list = wx.ListBox(card2, size=(-1, 100), style=wx.BORDER_NONE)
+        card2_sizer.Add(self.queue_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
 
-        progress_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.progress = wx.Gauge(self.panel, range=100, style=wx.GA_HORIZONTAL)
-        self.progress.SetValue(0)
-        progress_sizer.Add(self.progress, 1, wx.ALIGN_CENTER_VERTICAL)
-        self.progress_label = wx.StaticText(self.panel, label="", size=(90, -1))
-        progress_sizer.Add(self.progress_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
-        main_sizer.Add(progress_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
+        self.progress = ProgressBar(card2)
+        card2_sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
-        self.status_label = wx.StaticText(self.panel, label="")
-        main_sizer.Add(self.status_label, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 4)
+        self.status_label = wx.StaticText(card2, label="")
+        card2_sizer.Add(self.status_label, 0, wx.EXPAND | wx.ALL, 12)
+        main_sizer.Add(card2, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
 
-        main_sizer.Add(make_section_label(self.panel, "ログ"), 0, wx.LEFT | wx.TOP, 12)
-        self.log_ctrl = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
+        # --- カード3: ログ ---
+        card3, card3_sizer = make_card(self.panel)
+        self._cards.append(card3)
+        card3_sizer.Add(make_section_label(card3, "ログ"), 0, wx.ALL, 12)
+        self.log_ctrl = wx.TextCtrl(card3, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.BORDER_NONE)
         self.log_ctrl.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        main_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, 12)
-
-        settings_display = wx.BoxSizer(wx.HORIZONTAL)
-        font = wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_LIGHT)
-        self.fmt_text = wx.StaticText(self.panel, label=f"フォーマット: {self.config['output_format']} / {self.config['bitrate']}")
-        self.fmt_text.SetFont(font)
-        settings_display.Add(self.fmt_text, 0, wx.RIGHT, 20)
-        self.norm_text = wx.StaticText(self.panel, label=f"正規化: {'ON' if self.config['normalize'] else 'OFF'} ({self.config['target_lufs']} LUFS)")
-        self.norm_text.SetFont(font)
-        settings_display.Add(self.norm_text, 0, wx.RIGHT, 20)
-        self.meta_text = wx.StaticText(self.panel, label=f"メタデータ: {'ON' if self.config['embed_metadata'] else 'OFF'}")
-        self.meta_text.SetFont(font)
-        settings_display.Add(self.meta_text, 0)
-        main_sizer.Add(settings_display, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 15)
+        card3_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
+        main_sizer.Add(card3, 1, wx.EXPAND | wx.ALL, 10)
 
         self.panel.SetSizer(main_sizer)
+
+        # 設定サマリはステータスバーへ（画面下端に常駐して見やすく）
+        self.CreateStatusBar(3)
+        self.SetStatusWidths([-3, -2, -2])
 
     def _populate_url_history(self):
         self.url_ctrl.Clear()
@@ -370,28 +388,29 @@ class VibeDLFrame(wx.Frame):
         palette = get_palette(dark)
         apply_theme_recursive(self, dark,
                               accent_controls=(self.start_queue_btn,))
+        # カードは土台より一段明るい surface 色にして奥行きを出す
+        for card in self._cards:
+            card.SetBackgroundColour(palette["surface"])
         # ログ欄だけ背景を一段暗くする
         self.log_ctrl.SetBackgroundColour(palette["log_bg"])
         self.log_ctrl.SetForegroundColour(palette["fg"])
-        self.progress.SetBackgroundColour(palette["bg"])
-        # アイコンもテーマ色で描き直す（以前は薄色背景で固定だった）
-        self.settings_btn.SetBitmap(
-            create_gear_bitmap(24, palette["icon_fg"], palette["btn_bg"]))
-        self.open_folder_btn.SetBitmap(
-            create_folder_bitmap(24, palette["icon_fg"], palette["btn_bg"]))
+        self.progress.set_palette(palette)
+        status_bar = self.GetStatusBar()
+        if status_bar:
+            status_bar.SetBackgroundColour(palette["bg"])
+            status_bar.SetForegroundColour(palette["muted"])
         self.Refresh()
 
     def update_settings_display(self):
-        self.fmt_text.SetLabel(f"フォーマット: {self.config['output_format']} / {self.config['bitrate']}")
-        self.norm_text.SetLabel(f"正規化: {'ON' if self.config['normalize'] else 'OFF'} ({self.config['target_lufs']} LUFS)")
-        self.meta_text.SetLabel(f"メタデータ: {'ON' if self.config['embed_metadata'] else 'OFF'}")
+        self.SetStatusText(f"フォーマット: {self.config['output_format']} / {self.config['bitrate']}", 0)
+        self.SetStatusText(f"正規化: {'ON' if self.config['normalize'] else 'OFF'} ({self.config['target_lufs']} LUFS)", 1)
+        self.SetStatusText(f"メタデータ: {'ON' if self.config['embed_metadata'] else 'OFF'}", 2)
 
     def log(self, msg):
         self.log_ctrl.AppendText(msg + "\n")
 
     def on_download_progress(self, percent, speed="", eta=""):
         self.progress.SetValue(percent)
-        self.progress_label.SetLabel(f"{percent}%")
         parts = []
         if speed:
             parts.append(f"速度: {speed}")
@@ -477,7 +496,6 @@ class VibeDLFrame(wx.Frame):
     def start_queue(self):
         if any(item.status == "waiting" for item in self.queue):
             self.progress.SetValue(0)
-            self.progress_label.SetLabel("0%")
             self.status_label.SetLabel("")
         while len(self.active_workers) < self.max_workers:
             waiting = [item for item in self.queue if item.status == "waiting"]
@@ -502,7 +520,6 @@ class VibeDLFrame(wx.Frame):
             self.start_queue()
         elif not self.active_workers:
             self.progress.SetValue(100)
-            self.progress_label.SetLabel("100%")
             self.status_label.SetLabel("完了")
 
     def on_clear_queue(self, event):
