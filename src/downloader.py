@@ -60,6 +60,14 @@ def is_permanent_error(exc):
     message = str(exc).lower()
     return any(pattern in message for pattern in PERMANENT_ERROR_PATTERNS)
 
+FORMAT_ERROR_MESSAGE = (
+    "この動画にはダウンロードできる形式がありませんでした"
+    "（Premium限定・レンタル・メンバー限定などの可能性があります）"
+)
+
+def is_format_error(exc):
+    return "requested format is not available" in str(exc).lower()
+
 COOKIE_ERROR_MESSAGE = (
     "ブラウザのCookieを読み込めませんでした。"
     "ブラウザを完全に終了してから再試行するか、設定で別のブラウザ、"
@@ -181,6 +189,8 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         except Exception as e:
             if is_cookie_error(e):
                 raise Exception(COOKIE_ERROR_MESSAGE) from e
+            if is_format_error(e):
+                raise Exception(FORMAT_ERROR_MESSAGE) from e
             if is_permanent_error(e):
                 # 待っても直らないエラーはリトライせず、理由を添えて即終了する。
                 # 検索（flat）では利用可否が分からないため、検索結果にも
