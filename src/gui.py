@@ -207,6 +207,7 @@ class DownloadWorker(QThread):
                 end_sec=self.item.end_sec,
                 name_template=self.config.get("name_template", "{title}"),
                 cookies_browser=self.config.get("cookies_browser") or None,
+                cookies_file=self.config.get("cookies_file") or None,
             )
             self.log.emit("[1/3] ダウンロード完了")
             temp_out = data['temp_raw']
@@ -311,14 +312,15 @@ class InfoWorker(QThread):
     got = Signal(object, dict)
     failed = Signal(object)
 
-    def __init__(self, item, cookies_browser=None, parent=None):
+    def __init__(self, item, cookies_browser=None, cookies_file=None, parent=None):
         super().__init__(parent)
         self.item = item
         self.cookies_browser = cookies_browser
+        self.cookies_file = cookies_file
 
     def run(self):
         try:
-            info = get_video_info(self.item.url, self.cookies_browser)
+            info = get_video_info(self.item.url, self.cookies_browser, self.cookies_file)
             self.got.emit(self.item, info)
         except Exception:
             self.failed.emit(self.item)
@@ -350,14 +352,15 @@ class PlaylistWorker(QThread):
     got = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, url, cookies_browser=None, parent=None):
+    def __init__(self, url, cookies_browser=None, cookies_file=None, parent=None):
         super().__init__(parent)
         self.url = url
         self.cookies_browser = cookies_browser
+        self.cookies_file = cookies_file
 
     def run(self):
         try:
-            self.got.emit(get_playlist_entries(self.url, self.cookies_browser))
+            self.got.emit(get_playlist_entries(self.url, self.cookies_browser, self.cookies_file))
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -650,8 +653,9 @@ class VibeDLFrame(QMainWindow):
         return (start_sec, end_sec)
 
     # ---------- キュー追加（共通） ----------
-    def _cookies(self):
-        return self.config.get("cookies_browser") or None
+    def _cookie_args(self):
+        return (self.config.get("cookies_browser") or None,
+                self.config.get("cookies_file") or None)
 
     @staticmethod
     def _is_playlist_url(url):
@@ -674,7 +678,8 @@ class VibeDLFrame(QMainWindow):
         if thumb_url:
             self._fetch_thumb(item)
         elif fetch_info:
-            worker = InfoWorker(item, self._cookies(), self)
+            browser, cookie_file = self._cookie_args()
+            worker = InfoWorker(item, browser, cookie_file, self)
             worker.got.connect(self._on_info_got)
             self._keep_thread(worker)
             worker.start()
@@ -706,7 +711,8 @@ class VibeDLFrame(QMainWindow):
         """プレイリストURLなら展開し、それ以外はそのままキューへ追加する。"""
         if self._is_playlist_url(url):
             self.log("プレイリストを展開中...")
-            worker = PlaylistWorker(url, self._cookies(), self)
+            browser, cookie_file = self._cookie_args()
+            worker = PlaylistWorker(url, browser, cookie_file, self)
 
             def _got(entries, s=start_sec, e=end_sec):
                 if not entries:
@@ -1191,6 +1197,16 @@ class SettingsDialog(QDialog):
         cookie_row.addWidget(self.cookies_combo)
         cookie_row.addStretch()
         general_layout.addLayout(cookie_row)
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("cookies.txt（指定時は優先）"))
+        self.cookies_file_ctrl = QLineEdit()
+        self.cookies_file_ctrl.setText(self.config.get("cookies_file", ""))
+        self.cookies_file_ctrl.setPlaceholderText("cookies.txt のパス（任意）")
+        file_row.addWidget(self.cookies_file_ctrl, 1)
+        browse_cookie_btn = QPushButton("選択")
+        browse_cookie_btn.clicked.connect(self.on_browse_cookies_file)
+        file_row.addWidget(browse_cookie_btn)
+        general_layout.addLayout(file_row)
         general_layout.addStretch()
         tabs.addTab(general_tab, "一般")
 
@@ -1220,6 +1236,12 @@ class SettingsDialog(QDialog):
         if path:
             self.folder_ctrl.setText(path)
 
+    def on_browse_cookies_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "cookies.txt を選択", "", "テキストファイル (*.txt);;すべてのファイル (*.*)")
+        if path:
+            self.cookies_file_ctrl.setText(path)
+
     def get_config(self):
         self.config["output_format"] = self.fmt_combo.currentText()
         self.config["bitrate"] = self.br_combo.currentText()
@@ -1232,6 +1254,7 @@ class SettingsDialog(QDialog):
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
         self.config["cookies_browser"] = ["", "chrome", "edge", "firefox"][self.cookies_combo.currentIndex()]
+        self.config["cookies_file"] = self.cookies_file_ctrl.text().strip()
         self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
 

@@ -60,7 +60,30 @@ def is_permanent_error(exc):
     message = str(exc).lower()
     return any(pattern in message for pattern in PERMANENT_ERROR_PATTERNS)
 
-def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}", cookies_browser=None):
+COOKIE_ERROR_MESSAGE = (
+    "ブラウザのCookieを読み込めませんでした。"
+    "ブラウザを完全に終了してから再試行するか、設定で別のブラウザ、"
+    "または cookies.txt ファイルを指定してください"
+)
+
+def is_cookie_error(exc):
+    message = str(exc).lower()
+    if "cookie" not in message:
+        return False
+    return any(p in message for p in (
+        "could not copy", "decrypt", "failed to extract",
+        "database", "lock",
+    ))
+
+def _cookie_opts(cookies_browser=None, cookies_file=None):
+    """yt-dlp用のCookieオプションを返す。ファイル指定が優先。"""
+    if cookies_file:
+        return {'cookiefile': cookies_file}
+    if cookies_browser:
+        return {'cookiesfrombrowser': (cookies_browser,)}
+    return {}
+
+def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}", cookies_browser=None, cookies_file=None):
     output_dir = os.path.abspath(output_dir)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -94,11 +117,11 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
-        'cookiesfrombrowser': (cookies_browser,) if cookies_browser else None,
         'outtmpl': outtmpl,
         'progress_hooks': [progress_hook] if progress_hook else [],
         'postprocessors': postprocessors,
         'postprocessor_args': [],
+        **_cookie_opts(cookies_browser, cookies_file),
     }
 
     # 自動ダウンロード／同梱された FFmpeg を yt-dlp の変換にも使う。
@@ -156,6 +179,8 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
                     'thumb': info.get('thumbnail')
                 }
         except Exception as e:
+            if is_cookie_error(e):
+                raise Exception(COOKIE_ERROR_MESSAGE) from e
             if is_permanent_error(e):
                 # 待っても直らないエラーはリトライせず、理由を添えて即終了する。
                 # 検索（flat）では利用可否が分からないため、検索結果にも
@@ -194,21 +219,21 @@ def _flat_entry_to_dict(entry):
     }
 
 
-def _flat_extract(url_or_search, cookies_browser=None):
+def _flat_extract(url_or_search, cookies_browser=None, cookies_file=None):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': True,
         'skip_download': True,
-        'cookiesfrombrowser': (cookies_browser,) if cookies_browser else None,
+        **_cookie_opts(cookies_browser, cookies_file),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(url_or_search, download=False)
 
 
-def search_youtube(keyword, max_results=10, cookies_browser=None):
+def search_youtube(keyword, max_results=10, cookies_browser=None, cookies_file=None):
     """キーワードでYouTubeを検索し、候補のリストを返す（ダウンロードはしない）。"""
-    info = _flat_extract(f"ytsearch{max_results}:{keyword}", cookies_browser)
+    info = _flat_extract(f"ytsearch{max_results}:{keyword}", cookies_browser, cookies_file)
     results = []
     for entry in info.get('entries') or []:
         item = _flat_entry_to_dict(entry)
@@ -217,9 +242,9 @@ def search_youtube(keyword, max_results=10, cookies_browser=None):
     return results
 
 
-def get_playlist_entries(playlist_url, cookies_browser=None):
+def get_playlist_entries(playlist_url, cookies_browser=None, cookies_file=None):
     """プレイリストを展開し、収録動画のリストを返す（ダウンロードはしない）。"""
-    info = _flat_extract(playlist_url, cookies_browser)
+    info = _flat_extract(playlist_url, cookies_browser, cookies_file)
     results = []
     for entry in info.get('entries') or []:
         item = _flat_entry_to_dict(entry)
@@ -228,13 +253,13 @@ def get_playlist_entries(playlist_url, cookies_browser=None):
     return results
 
 
-def get_video_info(url, cookies_browser=None):
+def get_video_info(url, cookies_browser=None, cookies_file=None):
     """単一動画のタイトル・投稿者・長さ・サムネイルを取得する。"""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        'cookiesfrombrowser': (cookies_browser,) if cookies_browser else None,
+        **_cookie_opts(cookies_browser, cookies_file),
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)

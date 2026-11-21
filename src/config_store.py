@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
     "url_history": [],
     "name_template": "{title}",
     "cookies_browser": "",
+    "cookies_file": "",
 }
 
 # config key -> (registry value name, kind)
@@ -34,6 +35,7 @@ _KEY_MAP = {
     "clipboard_monitor": ("ClipboardMonitor", "bool"),
     "name_template": ("NameTemplate", "str"),
     "cookies_browser": ("CookiesBrowser", "str"),
+    "cookies_file": ("CookiesFile", "str"),
 }
 
 
