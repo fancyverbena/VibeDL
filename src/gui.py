@@ -4,7 +4,6 @@ import os
 import threading
 import math
 import winsound
-import time
 from downloader import download_audio
 from audio_processor import (
     normalize_audio, embed_metadata,
@@ -12,10 +11,66 @@ from audio_processor import (
 )
 from config_store import get_config, save_config
 
-def create_gear_bitmap(size=24, color=wx.Colour(80, 80, 80)):
+def get_palette(dark):
+    """テーマ色一式。ライトはOS標準色、ダークは固定パレット。"""
+    if dark:
+        return {
+            "bg": wx.Colour(45, 45, 48),
+            "fg": wx.Colour(241, 241, 241),
+            "entry_bg": wx.Colour(60, 60, 60),
+            "log_bg": wx.Colour(30, 30, 30),
+            "btn_bg": wx.Colour(85, 85, 85),
+            "icon_fg": wx.Colour(220, 220, 220),
+        }
+    return {
+        "bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
+        "fg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT),
+        "entry_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
+        "log_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW),
+        "btn_bg": wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE),
+        "icon_fg": wx.Colour(80, 80, 80),
+    }
+
+
+def apply_theme_recursive(window, dark, accent_controls=()):
+    """ウィンドウ配下の全コントロールへテーマを再帰適用する。
+
+    以前はパネル直下の子だけが対象で、入れ子のコントロールや
+    設定ダイアログの一部にテーマが効いていなかった。
+    accent_controls に渡したボタンは強調表示のまま維持する。
+    """
+    palette = get_palette(dark)
+    window.SetBackgroundColour(palette["bg"])
+    for child in window.GetChildren():
+        if isinstance(child, wx.StaticText):
+            child.SetForegroundColour(palette["fg"])
+        elif isinstance(child, (wx.TextCtrl, wx.ComboBox, wx.ListBox, wx.SpinCtrlDouble)):
+            child.SetBackgroundColour(palette["entry_bg"])
+            child.SetForegroundColour(palette["fg"])
+        elif isinstance(child, (wx.Button, wx.BitmapButton)):
+            if child not in accent_controls:
+                child.SetBackgroundColour(palette["btn_bg"])
+                child.SetForegroundColour(palette["fg"])
+        elif isinstance(child, wx.CheckBox):
+            child.SetForegroundColour(palette["fg"])
+        apply_theme_recursive(child, dark, accent_controls)
+    window.Refresh()
+
+
+def make_section_label(parent, text):
+    label = wx.StaticText(parent, label=text)
+    font = label.GetFont()
+    font.SetWeight(wx.FONTWEIGHT_BOLD)
+    label.SetFont(font)
+    return label
+
+
+def create_gear_bitmap(size=24, color=wx.Colour(80, 80, 80), bg=None):
+    if bg is None:
+        bg = wx.Colour(240, 240, 240)
     bitmap = wx.Bitmap(size, size)
     mdc = wx.MemoryDC(bitmap)
-    mdc.SetBackground(wx.Brush(wx.Colour(240, 240, 240)))
+    mdc.SetBackground(wx.Brush(bg))
     mdc.Clear()
     gc = wx.GraphicsContext.Create(mdc)
     gc.SetPen(wx.Pen(color, 2))
@@ -24,7 +79,7 @@ def create_gear_bitmap(size=24, color=wx.Colour(80, 80, 80)):
     r_outer = size/2 - 3
     r_inner = r_outer - 5
     gc.DrawEllipse(cx - r_outer, cy - r_outer, r_outer*2, r_outer*2)
-    gc.SetBrush(wx.Brush(wx.Colour(240, 240, 240)))
+    gc.SetBrush(wx.Brush(bg))
     gc.DrawEllipse(cx - r_inner, cy - r_inner, r_inner*2, r_inner*2)
     gc.SetBrush(wx.Brush(color))
     tooth_w = 4
@@ -38,10 +93,12 @@ def create_gear_bitmap(size=24, color=wx.Colour(80, 80, 80)):
     mdc.SelectObject(wx.NullBitmap)
     return bitmap
 
-def create_folder_bitmap(size=24, color=wx.Colour(80, 80, 80)):
+def create_folder_bitmap(size=24, color=wx.Colour(80, 80, 80), bg=None):
+    if bg is None:
+        bg = wx.Colour(240, 240, 240)
     bitmap = wx.Bitmap(size, size)
     mdc = wx.MemoryDC(bitmap)
-    mdc.SetBackground(wx.Brush(wx.Colour(240, 240, 240)))
+    mdc.SetBackground(wx.Brush(bg))
     mdc.Clear()
     gc = wx.GraphicsContext.Create(mdc)
     gc.SetPen(wx.Pen(color, 2))
@@ -68,6 +125,17 @@ class DownloadWorker(threading.Thread):
         self.config = config
         self.daemon = True
 
+    def _progress_hook(self, d):
+        if d.get('status') == 'downloading':
+            total = d.get('total_bytes') or d.get('total_bytes_estimate')
+            downloaded = d.get('downloaded_bytes', 0)
+            percent = int(downloaded / total * 100) if total else 0
+            speed = (d.get('_speed_str') or '').strip()
+            eta = (d.get('_eta_str') or '').strip()
+            wx.CallAfter(self.parent.on_download_progress, percent, speed, eta)
+        elif d.get('status') == 'finished':
+            wx.CallAfter(self.parent.on_download_progress, 100, "", "")
+
     def run(self):
         try:
             self.item.status = "downloading"
@@ -81,7 +149,7 @@ class DownloadWorker(threading.Thread):
             data = download_audio(
                 self.item.url, output_dir,
                 output_format=fmt, bitrate=br,
-                progress_hook=None,
+                progress_hook=self._progress_hook,
                 start_sec=self.item.start_sec,
                 end_sec=self.item.end_sec,
                 name_template=name_template
@@ -90,6 +158,7 @@ class DownloadWorker(threading.Thread):
             temp_out = data['temp_raw']
 
             if self.config["normalize"] and check_ffmpeg(self.parent.ffmpeg_info['path']):
+                wx.CallAfter(self.parent.set_status_label, "音量最適化中...")
                 wx.CallAfter(self.parent.log, "[2/3] 音量最適化中...")
                 normalized = normalize_audio(temp_out, self.config["target_lufs"],
                                              ffmpeg_info=self.parent.ffmpeg_info)
@@ -102,6 +171,7 @@ class DownloadWorker(threading.Thread):
                 wx.CallAfter(self.parent.log, "音量正規化をスキップ")
 
             if self.config["embed_metadata"]:
+                wx.CallAfter(self.parent.set_status_label, "メタデータ埋め込み中...")
                 wx.CallAfter(self.parent.log, "[3/3] メタデータ埋め込み中...")
                 embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
 
@@ -121,7 +191,8 @@ class DownloadWorker(threading.Thread):
 
 class VibeDLFrame(wx.Frame):
     def __init__(self):
-        super().__init__(None, title="VibeDL - Audio Downloader", size=(850, 650))
+        super().__init__(None, title="VibeDL - Audio Downloader", size=(880, 660))
+        self.SetMinSize((760, 560))
         self.ffmpeg_info = get_ffmpeg_info()
         # 設定はレジストリから読み込む（CLI版と共通）。
         # 以前は起動ごとの初期値で、設定も履歴も保存されなかった。
@@ -173,7 +244,8 @@ class VibeDLFrame(wx.Frame):
         input_sizer.Add(end_label, 0, wx.ALIGN_CENTER_VERTICAL)
         input_sizer.Add(end_sizer, 1, wx.EXPAND)
 
-        main_sizer.Add(input_sizer, 0, wx.EXPAND | wx.ALL, 15)
+        main_sizer.Add(make_section_label(self.panel, "ダウンロード"), 0, wx.LEFT | wx.TOP, 12)
+        main_sizer.Add(input_sizer, 0, wx.EXPAND | wx.ALL, 12)
 
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
@@ -185,6 +257,7 @@ class VibeDLFrame(wx.Frame):
         self.start_queue_btn.SetBackgroundColour(wx.Colour(0, 150, 0))
         self.start_queue_btn.SetForegroundColour(wx.Colour(255, 255, 255))
         self.start_queue_btn.Bind(wx.EVT_BUTTON, self.on_start_queue)
+        self.start_queue_btn.Enable(False)
         btn_sizer.Add(self.start_queue_btn, 0, wx.LEFT, 10)
 
         self.clear_queue_btn = wx.Button(self.panel, label="キューをクリア", size=(120, 32))
@@ -209,18 +282,25 @@ class VibeDLFrame(wx.Frame):
 
         main_sizer.Add(btn_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
 
-        queue_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        queue_sizer.Add(wx.StaticText(self.panel, label="キュー:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        self.queue_list = wx.ListBox(self.panel, size=(-1, 80))
-        queue_sizer.Add(self.queue_list, 1, wx.EXPAND)
-        main_sizer.Add(queue_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 15)
+        main_sizer.Add(make_section_label(self.panel, "キュー"), 0, wx.LEFT | wx.BOTTOM, 12)
+        self.queue_list = wx.ListBox(self.panel, size=(-1, 100))
+        main_sizer.Add(self.queue_list, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 12)
 
+        progress_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.progress = wx.Gauge(self.panel, range=100, style=wx.GA_HORIZONTAL)
         self.progress.SetValue(0)
-        main_sizer.Add(self.progress, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
+        progress_sizer.Add(self.progress, 1, wx.ALIGN_CENTER_VERTICAL)
+        self.progress_label = wx.StaticText(self.panel, label="", size=(90, -1))
+        progress_sizer.Add(self.progress_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+        main_sizer.Add(progress_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 12)
 
+        self.status_label = wx.StaticText(self.panel, label="")
+        main_sizer.Add(self.status_label, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 4)
+
+        main_sizer.Add(make_section_label(self.panel, "ログ"), 0, wx.LEFT | wx.TOP, 12)
         self.log_ctrl = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
-        main_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
+        self.log_ctrl.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        main_sizer.Add(self.log_ctrl, 1, wx.EXPAND | wx.ALL, 12)
 
         settings_display = wx.BoxSizer(wx.HORIZONTAL)
         font = wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_LIGHT)
@@ -265,64 +345,40 @@ class VibeDLFrame(wx.Frame):
             self.clipboard_timer.Stop()
 
     def on_clipboard_timer(self, event):
-        if not wx.TheClipboard.IsOpened():
-            try:
-                if wx.TheClipboard.Open():
-                    if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_TEXT)):
-                        data = wx.TextDataObject()
-                        wx.TheClipboard.GetData(data)
-                        text = data.GetText().strip()
-                        if ("youtube.com/watch" in text or "youtu.be/" in text) and text.startswith("http"):
-                            current = self.url_ctrl.GetValue().strip()
-                            if text != current:
-                                self.url_ctrl.SetValue(text)
-                                self.log("🔗 クリップボードからURLを貼り付けました")
-                    wx.TheClipboard.Close()
-            except:
-                pass
+        if wx.TheClipboard.IsOpened():
+            return
+        if not wx.TheClipboard.Open():
+            return
+        try:
+            if wx.TheClipboard.IsSupported(wx.DataFormat(wx.DF_TEXT)):
+                data = wx.TextDataObject()
+                wx.TheClipboard.GetData(data)
+                text = data.GetText().strip()
+                if ("youtube.com/watch" in text or "youtu.be/" in text) and text.startswith("http"):
+                    current = self.url_ctrl.GetValue().strip()
+                    if text != current:
+                        self.url_ctrl.SetValue(text)
+                        self.log("🔗 クリップボードからURLを貼り付けました")
+        except Exception:
+            pass
+        finally:
+            # 例外時も必ず閉じる（開いたままだと他のアプリが使えない）
+            wx.TheClipboard.Close()
 
     def apply_theme(self):
         dark = self.config.get("dark_mode", False)
-        if dark:
-            bg = wx.Colour(45, 45, 48)
-            fg = wx.Colour(255, 255, 255)
-            entry_bg = wx.Colour(60, 60, 60)
-            log_bg = wx.Colour(30, 30, 30)
-            btn_bg = wx.Colour(85, 85, 85)
-        else:
-            bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
-            fg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT)
-            entry_bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
-            log_bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
-            btn_bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE)
-
-        self.SetBackgroundColour(bg)
-        self.panel.SetBackgroundColour(bg)
-
-        for child in self.panel.GetChildren():
-            if isinstance(child, wx.StaticText):
-                child.SetForegroundColour(fg)
-            elif isinstance(child, wx.TextCtrl) and child != self.log_ctrl:
-                child.SetBackgroundColour(entry_bg)
-                child.SetForegroundColour(fg)
-            elif isinstance(child, wx.Button):
-                if child in (self.start_queue_btn, self.add_queue_btn):
-                    continue
-                child.SetBackgroundColour(btn_bg)
-                child.SetForegroundColour(fg)
-            elif isinstance(child, wx.BitmapButton):
-                child.SetBackgroundColour(btn_bg)
-            elif isinstance(child, wx.ComboBox):
-                child.SetBackgroundColour(entry_bg)
-                child.SetForegroundColour(fg)
-            elif isinstance(child, wx.ListBox):
-                child.SetBackgroundColour(entry_bg)
-                child.SetForegroundColour(fg)
-
-        self.log_ctrl.SetBackgroundColour(log_bg)
-        self.log_ctrl.SetForegroundColour(fg)
-        self.progress.SetBackgroundColour(bg)
-
+        palette = get_palette(dark)
+        apply_theme_recursive(self, dark,
+                              accent_controls=(self.start_queue_btn,))
+        # ログ欄だけ背景を一段暗くする
+        self.log_ctrl.SetBackgroundColour(palette["log_bg"])
+        self.log_ctrl.SetForegroundColour(palette["fg"])
+        self.progress.SetBackgroundColour(palette["bg"])
+        # アイコンもテーマ色で描き直す（以前は薄色背景で固定だった）
+        self.settings_btn.SetBitmap(
+            create_gear_bitmap(24, palette["icon_fg"], palette["btn_bg"]))
+        self.open_folder_btn.SetBitmap(
+            create_folder_bitmap(24, palette["icon_fg"], palette["btn_bg"]))
         self.Refresh()
 
     def update_settings_display(self):
@@ -332,6 +388,19 @@ class VibeDLFrame(wx.Frame):
 
     def log(self, msg):
         self.log_ctrl.AppendText(msg + "\n")
+
+    def on_download_progress(self, percent, speed="", eta=""):
+        self.progress.SetValue(percent)
+        self.progress_label.SetLabel(f"{percent}%")
+        parts = []
+        if speed:
+            parts.append(f"速度: {speed}")
+        if eta:
+            parts.append(f"残り: {eta}")
+        self.status_label.SetLabel("  ".join(parts))
+
+    def set_status_label(self, text):
+        self.status_label.SetLabel(text)
 
     def notify_user(self, title, message):
         if self.config.get("notify_sound", True):
@@ -371,8 +440,17 @@ class VibeDLFrame(wx.Frame):
         if not url:
             wx.MessageBox("URLを入力してください。", "入力エラー", wx.OK | wx.ICON_WARNING)
             return
-        start_sec = self.parse_time(self.start_ctrl.GetValue().strip())
-        end_sec = self.parse_time(self.end_ctrl.GetValue().strip())
+        try:
+            start_sec = self.parse_time(self.start_ctrl.GetValue())
+            end_sec = self.parse_time(self.end_ctrl.GetValue())
+        except ValueError:
+            wx.MessageBox("開始・終了は「秒」または「mm:ss」で入力してください。",
+                          "入力エラー", wx.OK | wx.ICON_WARNING)
+            return
+        if start_sec is not None and end_sec is not None and end_sec <= start_sec:
+            wx.MessageBox("終了は開始より後を指定してください。",
+                          "入力エラー", wx.OK | wx.ICON_WARNING)
+            return
         item = QueueItem(url, start_sec, end_sec)
         self.queue.append(item)
         self.update_queue_display()
@@ -387,6 +465,8 @@ class VibeDLFrame(wx.Frame):
         for item in self.queue:
             status = "⏳" if item.status == "waiting" else "⬇️" if item.status == "downloading" else "✅"
             self.queue_list.Append(f"{status} {item.url}")
+        has_waiting = any(item.status == "waiting" for item in self.queue)
+        self.start_queue_btn.Enable(has_waiting)
 
     def on_start_queue(self, event):
         if not self.queue:
@@ -395,6 +475,10 @@ class VibeDLFrame(wx.Frame):
         self.start_queue()
 
     def start_queue(self):
+        if any(item.status == "waiting" for item in self.queue):
+            self.progress.SetValue(0)
+            self.progress_label.SetLabel("0%")
+            self.status_label.SetLabel("")
         while len(self.active_workers) < self.max_workers:
             waiting = [item for item in self.queue if item.status == "waiting"]
             if not waiting:
@@ -416,30 +500,35 @@ class VibeDLFrame(wx.Frame):
         self.update_queue_display()
         if self.queue:
             self.start_queue()
+        elif not self.active_workers:
+            self.progress.SetValue(100)
+            self.progress_label.SetLabel("100%")
+            self.status_label.SetLabel("完了")
 
     def on_clear_queue(self, event):
-        for item in self.queue:
-            if item.status == "waiting":
-                self.queue.remove(item)
+        # イテレーション中の remove は要素を飛ばすため、作り直す
+        self.queue = [item for item in self.queue if item.status != "waiting"]
         self.update_queue_display()
         self.log("キューをクリアしました。")
 
     def parse_time(self, timestr):
+        """時刻文字列を秒に変換する。空欄は None、不正な入力は ValueError。"""
+        timestr = timestr.strip()
         if not timestr:
             return None
         if ':' in timestr:
-            parts = list(map(int, timestr.split(':')))
+            parts = [int(p) for p in timestr.split(':')]
             if len(parts) == 2:
-                return parts[0] * 60 + parts[1]
+                seconds = parts[0] * 60 + parts[1]
             elif len(parts) == 3:
-                return parts[0] * 3600 + parts[1] * 60 + parts[2]
+                seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
             else:
-                return None
+                raise ValueError(f"時刻の形式が不正です: {timestr}")
         else:
-            try:
-                return int(timestr)
-            except ValueError:
-                return None
+            seconds = int(timestr)
+        if seconds < 0:
+            raise ValueError(f"時刻が負の値です: {timestr}")
+        return seconds
 
     def on_open_folder(self, event):
         if self.last_dest_path:
@@ -570,43 +659,8 @@ class SettingsDialog(wx.Dialog):
         self.panel.SetSizer(sizer)
 
     def apply_theme_to_dialog(self):
-        dark = self.dark_cb.GetValue()
-        if dark:
-            bg = wx.Colour(45, 45, 48)
-            fg = wx.Colour(255, 255, 255)
-            entry_bg = wx.Colour(60, 60, 60)
-            btn_bg = wx.Colour(85, 85, 85)
-        else:
-            bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
-            fg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOWTEXT)
-            entry_bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_WINDOW)
-            btn_bg = wx.SystemSettings.GetColour(wx.SYS_COLOUR_BTNFACE)
-
-        self.SetBackgroundColour(bg)
-        self.panel.SetBackgroundColour(bg)
-
-        for page_index in range(self.notebook.GetPageCount()):
-            page = self.notebook.GetPage(page_index)
-            page.SetBackgroundColour(bg)
-            for child in page.GetChildren():
-                if isinstance(child, wx.StaticText):
-                    child.SetForegroundColour(fg)
-                elif isinstance(child, wx.TextCtrl):
-                    child.SetBackgroundColour(entry_bg)
-                    child.SetForegroundColour(fg)
-                elif isinstance(child, wx.Button):
-                    child.SetBackgroundColour(btn_bg)
-                    child.SetForegroundColour(fg)
-                elif isinstance(child, wx.ComboBox):
-                    child.SetBackgroundColour(entry_bg)
-                    child.SetForegroundColour(fg)
-                elif isinstance(child, wx.CheckBox):
-                    child.SetForegroundColour(fg)
-                elif isinstance(child, wx.SpinCtrlDouble):
-                    child.SetBackgroundColour(entry_bg)
-                    child.SetForegroundColour(fg)
-
-        self.Refresh()
+        # メイン画面と共通の再帰テーマ適用を使う
+        apply_theme_recursive(self, self.dark_cb.GetValue())
 
     def on_normalize_toggle(self, event):
         self.lufs_spin.Enable(self.normalize_cb.GetValue())
