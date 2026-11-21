@@ -63,7 +63,7 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
     if config["normalize"]:
         print(f"[2/3] 音量を最適化中 ({config['target_lufs']} LUFS)...")
         print(f"使用FFmpeg: {ffmpeg_info['source']}モード")
-        normalized = normalize_audio(temp_out, config['target_lufs'], ffmpeg_info=ffmpeg_info)
+        normalized = normalize_audio(temp_out, config['target_lufs'], ffmpeg_info=ffmpeg_info, bitrate=config.get('bitrate'))
         if not normalized:
             print("\n❌ 音量調整に失敗しました。FFmpegを確認してください。")
             if os.path.exists(temp_out):

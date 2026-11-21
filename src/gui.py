@@ -371,7 +371,8 @@ class DownloadWorker(QThread):
                 self.log.emit(tr("log_normalize"))
                 normalized = normalize_audio(
                     temp_out, self.config["target_lufs"],
-                    ffmpeg_info=self.ffmpeg_info)
+                    ffmpeg_info=self.ffmpeg_info,
+                    bitrate=self.config["bitrate"])
                 if normalized:
                     temp_out = normalized
                     self.log.emit(tr("log_normalize_done"))
