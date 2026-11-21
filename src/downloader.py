@@ -60,7 +60,7 @@ def is_permanent_error(exc):
     message = str(exc).lower()
     return any(pattern in message for pattern in PERMANENT_ERROR_PATTERNS)
 
-def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}"):
+def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}", cookies_browser=None):
     output_dir = os.path.abspath(output_dir)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -94,6 +94,7 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
+        'cookiesfrombrowser': (cookies_browser,) if cookies_browser else None,
         'outtmpl': outtmpl,
         'progress_hooks': [progress_hook] if progress_hook else [],
         'postprocessors': postprocessors,
@@ -170,34 +171,81 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
             else:
                 raise e
 
-def search_youtube(keyword, max_results=10):
-    """キーワードでYouTubeを検索し、候補のリストを返す（ダウンロードはしない）。"""
+def _flat_entry_to_dict(entry):
+    """extract_flat のエントリを共通の辞書形式に変換する。変換できなければ None。"""
+    if not entry:
+        return None
+    video_id = entry.get('id')
+    if video_id:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    else:
+        url = entry.get('url') or ''
+        if not url.startswith('http'):
+            return None
+    thumb = entry.get('thumbnail')
+    if not thumb and entry.get('thumbnails'):
+        thumb = entry['thumbnails'][-1].get('url')
+    return {
+        'url': url,
+        'title': entry.get('title') or 'Unknown',
+        'uploader': entry.get('uploader') or entry.get('channel') or '',
+        'duration': entry.get('duration'),
+        'thumb': thumb,
+    }
+
+
+def _flat_extract(url_or_search, cookies_browser=None):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': True,
         'skip_download': True,
+        'cookiesfrombrowser': (cookies_browser,) if cookies_browser else None,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(f"ytsearch{max_results}:{keyword}", download=False)
+        return ydl.extract_info(url_or_search, download=False)
+
+
+def search_youtube(keyword, max_results=10, cookies_browser=None):
+    """キーワードでYouTubeを検索し、候補のリストを返す（ダウンロードはしない）。"""
+    info = _flat_extract(f"ytsearch{max_results}:{keyword}", cookies_browser)
     results = []
     for entry in info.get('entries') or []:
-        if not entry:
-            continue
-        video_id = entry.get('id')
-        if video_id:
-            url = f"https://www.youtube.com/watch?v={video_id}"
-        else:
-            url = entry.get('url') or ''
-            if not url.startswith('http'):
-                continue
-        results.append({
-            'url': url,
-            'title': entry.get('title') or 'Unknown',
-            'uploader': entry.get('uploader') or entry.get('channel') or '',
-            'duration': entry.get('duration'),
-        })
+        item = _flat_entry_to_dict(entry)
+        if item:
+            results.append(item)
     return results
+
+
+def get_playlist_entries(playlist_url, cookies_browser=None):
+    """プレイリストを展開し、収録動画のリストを返す（ダウンロードはしない）。"""
+    info = _flat_extract(playlist_url, cookies_browser)
+    results = []
+    for entry in info.get('entries') or []:
+        item = _flat_entry_to_dict(entry)
+        if item:
+            results.append(item)
+    return results
+
+
+def get_video_info(url, cookies_browser=None):
+    """単一動画のタイトル・投稿者・長さ・サムネイルを取得する。"""
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'cookiesfrombrowser': (cookies_browser,) if cookies_browser else None,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if info.get('entries'):
+        info = info['entries'][0]
+    return {
+        'title': info.get('title') or 'Unknown',
+        'uploader': info.get('uploader') or '',
+        'duration': info.get('duration'),
+        'thumb': info.get('thumbnail'),
+    }
 
 def download_playlist(playlist_url, config, progress_hook=None):
     output_dir = os.path.abspath(config['output_folder'])
