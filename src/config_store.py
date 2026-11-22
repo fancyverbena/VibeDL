@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "fade_enabled": False,
     "fade_seconds": 1.0,
     "language": "ja",
+    "max_parallel": 2,
 }
 
 # config key -> (registry value name, kind)
@@ -44,6 +45,7 @@ _KEY_MAP = {
     "fade_enabled": ("FadeEnabled", "bool"),
     "fade_seconds": ("FadeSeconds", "float"),
     "language": ("Language", "str"),
+    "max_parallel": ("MaxParallel", "int"),
 }
 
 
@@ -68,6 +70,8 @@ def get_config():
             try:
                 if kind == "float":
                     config[cfg_key] = float(raw)
+                elif kind == "int":
+                    config[cfg_key] = int(raw)
                 elif kind == "bool":
                     config[cfg_key] = raw == "True"
                 else:
