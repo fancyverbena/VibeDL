@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import webbrowser
 import urllib.request
 import winsound
 from datetime import datetime
@@ -17,7 +18,8 @@ from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit,
     QProgressBar, QProgressDialog, QPushButton, QSpinBox, QTabWidget,
     QVBoxLayout, QWidget, QSystemTrayIcon,
 )
@@ -33,6 +35,7 @@ from audio_processor import (
 )
 from config_store import (
     get_config, save_config, load_download_history, save_download_history,
+    load_queue_items, save_queue_items,
 )
 
 CURRENT_LANG = "ja"
@@ -176,6 +179,12 @@ TEXTS = {
     "log_auto_retry": {"ja": "自動リトライ {n}/{max}: {name}", "en": "Auto-retry {n}/{max}: {name}"},
     "rate_limit_label": {"ja": "速度制限 MB/s（0=無制限）", "en": "Rate limit MB/s (0 = unlimited)"},
     "history_search_ph": {"ja": "タイトルで検索", "en": "Search by title"},
+    "ctx_copy_url": {"ja": "URLをコピー", "en": "Copy URL"},
+    "ctx_open_browser": {"ja": "ブラウザで開く", "en": "Open in browser"},
+    "ctx_remove": {"ja": "キューから削除", "en": "Remove from queue"},
+    "ctx_retry": {"ja": "再試行", "en": "Retry"},
+    "log_queue_restored": {"ja": "前回のキューを {n} 件復元しました", "en": "Restored {n} item(s) from the previous queue"},
+    "queue_summary": {"ja": "{n} 件 / 合計 {dur}", "en": "{n} item(s) / total {dur}"},
     "parallel_pro_note": {"ja": "※3以上は Pro ライセンスが必要です（未登録の場合は2まで有効）", "en": "3 or more requires a Pro license (capped at 2 without one)."},
     "license_label": {"ja": "Pro ライセンスキー", "en": "Pro license key"},
     "license_check": {"ja": "確認", "en": "Check"},
@@ -648,6 +657,7 @@ class VibeDLFrame(QMainWindow):
         self._init_ui()
         self.apply_theme()
         self.update_settings_display()
+        self._restore_queue()
 
         self.tray = QSystemTrayIcon(make_app_icon(), self)
         self.tray.show()
@@ -758,7 +768,13 @@ class VibeDLFrame(QMainWindow):
         # カード2: キュー + 進捗
         card2, card2_layout = make_card()
         card2_layout.addWidget(section_label(tr("section_queue")))
+        self.queue_summary = QLabel("")
+        self.queue_summary.setObjectName("muted")
+        card2_layout.addWidget(self.queue_summary)
         self.queue_list = QListWidget()
+        self.queue_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.queue_list.customContextMenuRequested.connect(
+            self._on_queue_context_menu)
         self.queue_list.setIconSize(QSize(96, 54))
         # ドラッグで並べ替え可能にし、表示順を self.queue に同期する
         self.queue_list.setDragDropMode(QAbstractItemView.InternalMove)
@@ -942,6 +958,7 @@ class VibeDLFrame(QMainWindow):
         item.duration = duration
         item.thumb_url = thumb_url
         self.queue.append(item)
+        self._save_queue()
         self.add_to_history(url)
         self.update_queue_display()
         self.log(tr("added_to_queue", name=title or url))
@@ -1053,6 +1070,11 @@ class VibeDLFrame(QMainWindow):
         self.start_queue_btn.setEnabled(has_waiting)
         self.retry_failed_btn.setEnabled(
             any(item.status == "failed" for item in self.queue))
+        if hasattr(self, "queue_summary"):
+            total_dur = sum(i.duration or 0 for i in self.queue)
+            self.queue_summary.setText(tr(
+                "queue_summary", n=len(self.queue),
+                dur=format_duration(total_dur) if total_dur else "--:--"))
 
     def _on_queue_rows_moved(self, *args):
         """ドラッグ並べ替え後の表示順を self.queue に反映する。"""
@@ -1063,6 +1085,77 @@ class VibeDLFrame(QMainWindow):
                 new_order.append(obj)
         if len(new_order) == len(self.queue):
             self.queue = new_order
+            self._save_queue()
+
+    # ---------- キューの保存・復元 / 右クリックメニュー ----------
+    def _save_queue(self):
+        entries = [{
+            'url': i.url, 'title': i.title, 'duration': i.duration,
+            'thumb_url': i.thumb_url,
+            'start_sec': i.start_sec, 'end_sec': i.end_sec,
+            'status': 'failed' if i.status == 'failed' else 'waiting',
+            'retry_count': i.retry_count,
+        } for i in self.queue]
+        try:
+            save_queue_items(entries)
+        except OSError:
+            pass
+
+    def _restore_queue(self):
+        try:
+            entries = load_queue_items()
+        except OSError:
+            entries = []
+        restored = 0
+        for e in entries:
+            if not e.get('url'):
+                continue
+            item = QueueItem(e['url'], e.get('start_sec'), e.get('end_sec'))
+            item.title = e.get('title')
+            item.duration = e.get('duration')
+            item.thumb_url = e.get('thumb_url')
+            item.status = ('failed' if e.get('status') == 'failed'
+                           else 'waiting')
+            item.retry_count = int(e.get('retry_count', 0))
+            self.queue.append(item)
+            restored += 1
+            if item.thumb_url:
+                self._fetch_thumb(item)
+        if restored:
+            self.update_queue_display()
+            self.log(tr("log_queue_restored", n=restored))
+
+    def _on_queue_context_menu(self, pos):
+        list_item = self.queue_list.itemAt(pos)
+        if list_item is None:
+            return
+        item = list_item.data(Qt.UserRole)
+        if item is None:
+            return
+        menu = QMenu(self)
+        act_copy = menu.addAction(tr("ctx_copy_url"))
+        act_open = menu.addAction(tr("ctx_open_browser"))
+        act_retry = None
+        if item.status == "failed":
+            act_retry = menu.addAction(tr("ctx_retry"))
+        act_remove = None
+        if item.status in ("waiting", "failed"):
+            act_remove = menu.addAction(tr("ctx_remove"))
+        action = menu.exec(self.queue_list.mapToGlobal(pos))
+        if action == act_copy:
+            QApplication.clipboard().setText(item.url)
+        elif action == act_open:
+            webbrowser.open(item.url)
+        elif act_retry is not None and action == act_retry:
+            item.status = "waiting"
+            item.retry_count = 0
+            self._save_queue()
+            self.update_queue_display()
+            self.start_queue()
+        elif act_remove is not None and action == act_remove:
+            self.queue.remove(item)
+            self._save_queue()
+            self.update_queue_display()
 
     def on_start_queue(self):
         if not self.queue:
@@ -1106,6 +1199,7 @@ class VibeDLFrame(QMainWindow):
     def on_item_cancelled(self, item):
         if item in self.queue:
             self.queue.remove(item)
+        self._save_queue()
         sender = self.sender()
         if sender in self.active_workers:
             self.active_workers.remove(sender)
@@ -1139,6 +1233,7 @@ class VibeDLFrame(QMainWindow):
                                 n=item.retry_count, max=max_retry))
                 else:
                     item.status = "failed"
+        self._save_queue()
         sender = self.sender()
         if sender in self.active_workers:
             self.active_workers.remove(sender)
@@ -1163,6 +1258,7 @@ class VibeDLFrame(QMainWindow):
         for item in failed:
             item.status = "waiting"
             item.retry_count = 0
+        self._save_queue()
         self.log(tr("log_retry_failed", n=len(failed)))
         self.update_queue_display()
         self.start_queue()
@@ -1187,6 +1283,7 @@ class VibeDLFrame(QMainWindow):
     def on_clear_queue(self):
         self.queue = [i for i in self.queue
                       if i.status not in ("waiting", "failed")]
+        self._save_queue()
         self.update_queue_display()
         self.log(tr("queue_cleared"))
 
