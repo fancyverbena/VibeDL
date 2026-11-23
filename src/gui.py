@@ -14,11 +14,11 @@ from datetime import datetime
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
-    QProgressDialog, QPushButton, QTabWidget, QVBoxLayout, QWidget,
-    QSystemTrayIcon,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
+    QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
+    QProgressBar, QProgressDialog, QPushButton, QSpinBox, QTabWidget,
+    QVBoxLayout, QWidget, QSystemTrayIcon,
 )
 
 from downloader import (
@@ -151,6 +151,7 @@ TEXTS = {
     "select": {"ja": "選択", "en": "Select"},
     "tab_general": {"ja": "一般", "en": "General"},
     "language_label": {"ja": "言語", "en": "Language"},
+    "max_parallel_label": {"ja": "同時ダウンロード数（1〜5）", "en": "Parallel downloads (1-5)"},
     "language_note": {"ja": "※言語の変更は再起動後に反映されます", "en": "Language changes apply after restarting the app."},
     "folder_dialog": {"ja": "フォルダを選択", "en": "Select Folder"},
     "cookies_dialog": {"ja": "cookies.txt を選択", "en": "Select cookies.txt"},
@@ -547,7 +548,7 @@ class VibeDLFrame(QMainWindow):
         set_language(self.config.get("language", "ja"))
         self.queue = []
         self.active_workers = []
-        self.max_workers = 2
+        self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
         self.last_dest_path = None
         self.download_history = load_download_history()
         self._bg_threads = set()
@@ -664,6 +665,10 @@ class VibeDLFrame(QMainWindow):
         card2_layout.addWidget(section_label(tr("section_queue")))
         self.queue_list = QListWidget()
         self.queue_list.setIconSize(QSize(96, 54))
+        # ドラッグで並べ替え可能にし、表示順を self.queue に同期する
+        self.queue_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.queue_list.setDefaultDropAction(Qt.MoveAction)
+        self.queue_list.model().rowsMoved.connect(self._on_queue_rows_moved)
         self.queue_list.setFixedHeight(110)
         card2_layout.addWidget(self.queue_list)
         self.progress = QProgressBar()
@@ -926,6 +931,7 @@ class VibeDLFrame(QMainWindow):
             if item.duration:
                 label += f"  ({format_duration(item.duration)})"
             list_item = QListWidgetItem(f"{icons.get(item.status, '')} {label}")
+            list_item.setData(Qt.UserRole, item)
             if item.thumb_data:
                 pixmap = QPixmap()
                 if pixmap.loadFromData(item.thumb_data):
@@ -935,6 +941,16 @@ class VibeDLFrame(QMainWindow):
         has_waiting = any(item.status == "waiting" for item in self.queue)
         self.start_queue_btn.setEnabled(has_waiting)
 
+    def _on_queue_rows_moved(self, *args):
+        """ドラッグ並べ替え後の表示順を self.queue に反映する。"""
+        new_order = []
+        for i in range(self.queue_list.count()):
+            obj = self.queue_list.item(i).data(Qt.UserRole)
+            if obj is not None:
+                new_order.append(obj)
+        if len(new_order) == len(self.queue):
+            self.queue = new_order
+
     def on_start_queue(self):
         if not self.queue:
             QMessageBox.information(self, tr("info_title"), tr("queue_empty"))
@@ -942,7 +958,9 @@ class VibeDLFrame(QMainWindow):
         self.start_queue()
 
     def start_queue(self):
-        if any(item.status == "waiting" for item in self.queue):
+        # 実行中のワーカーがある場合は進捗表示をリセットしない（設定変更で
+        # 空き枠を埋める場合など、途中での呼び出しに備える）
+        if not self.active_workers and any(item.status == "waiting" for item in self.queue):
             self.progress.setValue(0)
             self.status_label.setText("")
         while len(self.active_workers) < self.max_workers:
@@ -1091,6 +1109,10 @@ class VibeDLFrame(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self.config = dlg.get_config()
             save_config(self.config)
+            self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
+            # 実行中に上限を上げたら空き枠をすぐ埋める（停止中のキューは動かさない）
+            if self.active_workers:
+                self.start_queue()
             self.apply_theme()
             self.update_settings_display()
             self.update_clipboard_monitor()
@@ -1390,6 +1412,15 @@ class SettingsDialog(QDialog):
         lang_note = QLabel(tr("language_note"))
         lang_note.setObjectName("muted")
         general_layout.addWidget(lang_note)
+        parallel_row = QHBoxLayout()
+        parallel_row.addWidget(QLabel(tr("max_parallel_label")))
+        self.parallel_spin = QSpinBox()
+        self.parallel_spin.setRange(1, 5)
+        self.parallel_spin.setValue(
+            max(1, min(5, int(self.config.get("max_parallel", 2)))))
+        parallel_row.addWidget(self.parallel_spin)
+        parallel_row.addStretch()
+        general_layout.addLayout(parallel_row)
         general_layout.addStretch()
         tabs.addTab(general_tab, tr("tab_general"))
 
@@ -1442,6 +1473,7 @@ class SettingsDialog(QDialog):
         self.config["cookies_browser"] = ["", "chrome", "edge", "firefox"][self.cookies_combo.currentIndex()]
         self.config["cookies_file"] = self.cookies_file_ctrl.text().strip()
         self.config["language"] = ["ja", "en"][self.language_combo.currentIndex()]
+        self.config["max_parallel"] = self.parallel_spin.value()
         self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
 
