@@ -28,6 +28,8 @@ DEFAULT_CONFIG = {
     "split_chapters": False,
     "embed_lyrics": False,
     "loudnorm_tp": -2.0,
+    "skip_duplicates": False,
+    "after_finish": "",
 }
 
 # config key -> (registry value name, kind)
@@ -54,6 +56,8 @@ _KEY_MAP = {
     "split_chapters": ("SplitChapters", "bool"),
     "embed_lyrics": ("EmbedLyrics", "bool"),
     "loudnorm_tp": ("LoudnormTP", "float"),
+    "skip_duplicates": ("SkipDuplicates", "bool"),
+    "after_finish": ("AfterFinish", "str"),
 }
 
 
