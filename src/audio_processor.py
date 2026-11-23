@@ -9,7 +9,7 @@ import zipfile
 import shutil
 import tempfile
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC, TPE1, TIT2, TALB, ID3NoHeaderError
+from mutagen.id3 import ID3, APIC, TPE1, TIT2, TALB, USLT, ID3NoHeaderError
 from mutagen.mp4 import MP4, MP4Cover
 from mutagen.flac import FLAC, Picture
 
@@ -170,12 +170,12 @@ def _encoder_args(ext, bitrate):
     return ['-q:a', '2']
 
 
-def _measure_loudness(ffmpeg_bin, input_path, target_lufs):
+def _measure_loudness(ffmpeg_bin, input_path, target_lufs, target_tp=-2.0):
     """loudnorm の 1 パス目: 入力のラウドネスを測定して dict で返す。
 
     失敗したら None（呼び出し側は従来の 1 パス処理にフォールバック）。
     """
-    filt = f"loudnorm=I={target_lufs}:TP=-2.0:LRA=11:print_format=json"
+    filt = f"loudnorm=I={target_lufs}:TP={target_tp}:LRA=11:print_format=json"
     try:
         result = subprocess.run(
             [ffmpeg_bin, '-i', input_path, '-af', filt, '-f', 'null', '-'],
@@ -195,7 +195,7 @@ def _measure_loudness(ffmpeg_bin, input_path, target_lufs):
 
 
 def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None,
-                    bitrate=None):
+                    bitrate=None, target_tp=-2.0):
     if ffmpeg_info is None:
         ffmpeg_info = get_ffmpeg_info()
 
@@ -206,10 +206,11 @@ def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None,
     # 2パス loudnorm: まず測定し、その結果を渡すことで線形調整
     # （音質劣化の少ない一律ゲイン）が可能になる。測定できなければ
     # 従来の1パス処理にフォールバックする。
-    measured = _measure_loudness(ffmpeg_bin, input_path, target_lufs)
+    measured = _measure_loudness(ffmpeg_bin, input_path, target_lufs,
+                                 target_tp)
     if measured:
         loudnorm_filter = (
-            f"loudnorm=I={target_lufs}:TP=-2.0:LRA=11"
+            f"loudnorm=I={target_lufs}:TP={target_tp}:LRA=11"
             f":measured_I={measured['input_i']}"
             f":measured_TP={measured['input_tp']}"
             f":measured_LRA={measured['input_lra']}"
@@ -217,7 +218,7 @@ def normalize_audio(input_path, target_lufs=-14.0, ffmpeg_info=None,
             f":offset={measured['target_offset']}:linear=true"
         )
     else:
-        loudnorm_filter = f"loudnorm=I={target_lufs}:TP=-2.0:LRA=11"
+        loudnorm_filter = f"loudnorm=I={target_lufs}:TP={target_tp}:LRA=11"
 
     cmd = [
         ffmpeg_bin, '-y', '-i', input_path,
@@ -275,7 +276,67 @@ def trim_and_fade(input_path, trim_silence=False, fade_sec=0.0, ffmpeg_info=None
             os.remove(output_path)
         return None
 
-def embed_metadata(file_path, title, artist, thumb_url):
+def vtt_to_lyrics(vtt_text):
+    """WebVTT 字幕テキストを歌詞用のプレーンテキストに変換する。
+
+    タイムスタンプ・タグ・NOTE等を取り除き、自動字幕でよくある
+    連続する重複行（ロールアップ表示の名残）を畳む。
+    """
+    lines = []
+    for raw in vtt_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(('WEBVTT', 'NOTE', 'Kind:', 'Language:')):
+            continue
+        if '-->' in line:
+            continue
+        if line.isdigit():
+            continue
+        line = re.sub(r'<[^>]+>', '', line).strip()
+        if not line:
+            continue
+        if lines and lines[-1] == line:
+            continue
+        lines.append(line)
+    return '\n'.join(lines) or None
+
+
+def split_into_chapters(input_path, chapters, ffmpeg_info=None,
+                        bitrate=None):
+    """音声ファイルをチャプター区間で分割する。
+
+    成功したら [{'path':..., 'title':..., 'index':...}, ...] を返し、
+    失敗したら None（生成済みの中間ファイルは掃除する）。
+    """
+    if ffmpeg_info is None:
+        ffmpeg_info = get_ffmpeg_info()
+    ffmpeg_bin = ffmpeg_info['path']
+    base, ext = os.path.splitext(input_path)
+    parts = []
+    try:
+        for i, ch in enumerate(chapters):
+            start = float(ch.get('start_time', 0))
+            end = ch.get('end_time')
+            out_path = f"{base}_ch{i + 1:02d}{ext}"
+            cmd = [ffmpeg_bin, '-y', '-ss', str(start), '-i', input_path]
+            if end is not None:
+                cmd += ['-to', str(float(end) - start)]
+            cmd += [*_encoder_args(ext, bitrate), out_path]
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            parts.append({'path': out_path,
+                          'title': ch.get('title') or f"Chapter {i + 1}",
+                          'index': i})
+    except Exception:
+        for part in parts:
+            if os.path.exists(part['path']):
+                os.remove(part['path'])
+        return None
+    return parts
+
+
+def embed_metadata(file_path, title, artist, thumb_url, lyrics=None):
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext == '.mp3':
@@ -291,6 +352,8 @@ def embed_metadata(file_path, title, artist, thumb_url):
         audio.tags.add(TIT2(encoding=3, text=title))
         audio.tags.add(TPE1(encoding=3, text=artist))
         audio.tags.add(TALB(encoding=3, text="VibeDL"))
+        if lyrics:
+            audio.tags.add(USLT(encoding=3, lang='jpn', desc='', text=lyrics))
 
         if thumb_url:
             try:
@@ -307,6 +370,8 @@ def embed_metadata(file_path, title, artist, thumb_url):
         audio['\xa9nam'] = title
         audio['\xa9ART'] = artist
         audio['\xa9alb'] = 'VibeDL'
+        if lyrics:
+            audio['\xa9lyr'] = lyrics
 
         if thumb_url:
             try:
@@ -321,6 +386,8 @@ def embed_metadata(file_path, title, artist, thumb_url):
         audio['title'] = title
         audio['artist'] = artist
         audio['album'] = 'VibeDL'
+        if lyrics:
+            audio['lyrics'] = lyrics
 
         if thumb_url:
             try:

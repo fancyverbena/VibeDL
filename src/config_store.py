@@ -25,6 +25,9 @@ DEFAULT_CONFIG = {
     "language": "ja",
     "max_parallel": 2,
     "license_key": "",
+    "split_chapters": False,
+    "embed_lyrics": False,
+    "loudnorm_tp": -2.0,
 }
 
 # config key -> (registry value name, kind)
@@ -48,6 +51,9 @@ _KEY_MAP = {
     "language": ("Language", "str"),
     "max_parallel": ("MaxParallel", "int"),
     "license_key": ("LicenseKey", "str"),
+    "split_chapters": ("SplitChapters", "bool"),
+    "embed_lyrics": ("EmbedLyrics", "bool"),
+    "loudnorm_tp": ("LoudnormTP", "float"),
 }
 
 

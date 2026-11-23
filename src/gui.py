@@ -23,10 +23,11 @@ from PySide6.QtWidgets import (
 
 from downloader import (
     download_audio, search_youtube, get_playlist_entries, get_video_info,
+    clean_title, get_unique_path,
 )
 from license_check import is_pro as _license_is_pro, parse_license_key
 from audio_processor import (
-    normalize_audio, embed_metadata, trim_and_fade,
+    normalize_audio, embed_metadata, trim_and_fade, split_into_chapters,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
 )
 from config_store import (
@@ -135,6 +136,12 @@ TEXTS = {
     "tab_output": {"ja": "出力", "en": "Output"},
     "normalize_cb": {"ja": "音量正規化", "en": "Volume normalization"},
     "lufs_label": {"ja": "目標 LUFS:", "en": "Target LUFS:"},
+    "tp_label": {"ja": "トゥルーピーク上限 (dBTP)（Pro）:", "en": "True peak ceiling (dBTP) (Pro):"},
+    "split_chapters_cb": {"ja": "チャプターごとに分割して保存（Pro）", "en": "Split into chapters (Pro)"},
+    "embed_lyrics_cb": {"ja": "字幕があれば歌詞として埋め込む（Pro）", "en": "Embed subtitles as lyrics when available (Pro)"},
+    "log_chapter_split": {"ja": "チャプター分割: {count} ファイルに分割します", "en": "Splitting into {count} chapter files"},
+    "log_chapter_failed": {"ja": "チャプター分割に失敗したため、通常の1ファイルで保存します", "en": "Chapter split failed; saving as a single file"},
+    "template_note": {"ja": "使用可能: {title} {uploader} {id} {date}（投稿日）。'/' を入れるとフォルダ分けできます（Pro）", "en": "Available: {title} {uploader} {id} {date} (upload date). Use '/' to create subfolders (Pro)."},
     "meta_cb": {"ja": "メタデータ埋め込み", "en": "Embed metadata"},
     "tab_processing": {"ja": "処理", "en": "Processing"},
     "trim_cb": {"ja": "無音トリミング（先頭・末尾）", "en": "Trim silence (start/end)"},
@@ -341,6 +348,7 @@ class DownloadWorker(QThread):
         try:
             self.item.status = "downloading"
             self.log.emit(tr("log_processing", url=self.item.url))
+            pro = _license_is_pro(self.config.get("license_key", ""))
             data = download_audio(
                 self.item.url, self.config["output_folder"],
                 output_format=self.config["output_format"],
@@ -351,48 +359,21 @@ class DownloadWorker(QThread):
                 name_template=self.config.get("name_template", "{title}"),
                 cookies_browser=self.config.get("cookies_browser") or None,
                 cookies_file=self.config.get("cookies_file") or None,
+                with_subtitles=bool(
+                    pro and self.config.get("embed_lyrics")
+                    and self.config.get("embed_metadata")),
+                allow_folders=pro,
             )
             self.log.emit(tr("log_dl_done"))
-            temp_out = data['temp_raw']
-
-            self._check_cancelled()
-            if (self.config.get("trim_silence") or self.config.get("fade_enabled")) \
+            chapters = data.get('chapters') or []
+            if pro and self.config.get("split_chapters") \
+                    and len(chapters) >= 2 and self.item.start_sec is None \
                     and check_ffmpeg(self.ffmpeg_info['path']):
-                self.phase.emit(tr("phase_trim"))
-                self.log.emit(tr("log_trim"))
-                fade_sec = float(self.config.get("fade_seconds", 1.0)) \
-                    if self.config.get("fade_enabled") else 0.0
-                trimmed = trim_and_fade(
-                    temp_out,
-                    trim_silence=bool(self.config.get("trim_silence")),
-                    fade_sec=fade_sec,
-                    ffmpeg_info=self.ffmpeg_info)
-                if trimmed:
-                    temp_out = trimmed
-                    self.log.emit(tr("log_trim_done"))
-                else:
-                    self.log.emit(tr("log_trim_failed"))
-
-            if self.config["normalize"] and check_ffmpeg(self.ffmpeg_info['path']):
-                self.phase.emit(tr("phase_normalize"))
-                self.log.emit(tr("log_normalize"))
-                normalized = normalize_audio(
-                    temp_out, self.config["target_lufs"],
-                    ffmpeg_info=self.ffmpeg_info,
-                    bitrate=self.config["bitrate"])
-                if normalized:
-                    temp_out = normalized
-                    self.log.emit(tr("log_normalize_done"))
-                else:
-                    self.log.emit(tr("log_normalize_failed"))
-            else:
-                self.log.emit(tr("log_normalize_skip"))
-
-            self._check_cancelled()
-            if self.config["embed_metadata"]:
-                self.phase.emit(tr("phase_metadata"))
-                self.log.emit(tr("log_metadata"))
-                embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
+                if self._run_chapters(data, chapters, pro):
+                    return
+            temp_out = self._post_process(
+                data['temp_raw'], data['title'], data['uploader'],
+                data['thumb'], data.get('lyrics'), pro)
 
             if os.path.exists(data['dest_path']):
                 os.remove(data['dest_path'])
@@ -415,6 +396,86 @@ class DownloadWorker(QThread):
             else:
                 self.log.emit(tr("log_error", url=self.item.url, err=e))
                 self.item_finished.emit(self.item, None)
+
+    def _post_process(self, temp_out, title, uploader, thumb, lyrics, pro):
+        """トリム→正規化→メタデータの後処理を行い、最終の中間パスを返す。"""
+        self._check_cancelled()
+        if (self.config.get("trim_silence") or self.config.get("fade_enabled")) \
+                and check_ffmpeg(self.ffmpeg_info['path']):
+            self.phase.emit(tr("phase_trim"))
+            self.log.emit(tr("log_trim"))
+            fade_sec = float(self.config.get("fade_seconds", 1.0)) \
+                if self.config.get("fade_enabled") else 0.0
+            trimmed = trim_and_fade(
+                temp_out,
+                trim_silence=bool(self.config.get("trim_silence")),
+                fade_sec=fade_sec,
+                ffmpeg_info=self.ffmpeg_info)
+            if trimmed:
+                temp_out = trimmed
+                self.log.emit(tr("log_trim_done"))
+            else:
+                self.log.emit(tr("log_trim_failed"))
+
+        if self.config["normalize"] and check_ffmpeg(self.ffmpeg_info['path']):
+            self.phase.emit(tr("phase_normalize"))
+            self.log.emit(tr("log_normalize"))
+            normalized = normalize_audio(
+                temp_out, self.config["target_lufs"],
+                ffmpeg_info=self.ffmpeg_info,
+                bitrate=self.config["bitrate"],
+                target_tp=float(self.config.get("loudnorm_tp", -2.0))
+                if pro else -2.0)
+            if normalized:
+                temp_out = normalized
+                self.log.emit(tr("log_normalize_done"))
+            else:
+                self.log.emit(tr("log_normalize_failed"))
+        else:
+            self.log.emit(tr("log_normalize_skip"))
+
+        self._check_cancelled()
+        if self.config["embed_metadata"]:
+            self.phase.emit(tr("phase_metadata"))
+            self.log.emit(tr("log_metadata"))
+            embed_metadata(temp_out, title, uploader, thumb, lyrics=lyrics)
+        return temp_out
+
+    def _run_chapters(self, data, chapters, pro):
+        """チャプター分割モードの処理。分割できたら True（呼び出し側は終了）。"""
+        parts = split_into_chapters(
+            data['temp_raw'], chapters, ffmpeg_info=self.ffmpeg_info,
+            bitrate=self.config["bitrate"])
+        if not parts:
+            self.log.emit(tr("log_chapter_failed"))
+            return False
+        self.log.emit(tr("log_chapter_split", count=len(parts)))
+        base, ext = os.path.splitext(data['dest_path'])
+        dests = []
+        for part in parts:
+            out = self._post_process(
+                part['path'], part['title'], data['uploader'],
+                data['thumb'], None, pro)
+            dest = get_unique_path(
+                f"{base} [{part['index'] + 1:02d} "
+                f"{clean_title(part['title'])}]{ext}")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.rename(out, dest)
+            part_base, part_ext = os.path.splitext(part['path'])
+            for leftover in (part['path'], f"{part_base}_trim{part_ext}",
+                             f"{part_base}_tmp{part_ext}",
+                             f"{part_base}_trim_tmp{part_ext}"):
+                if os.path.exists(leftover):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
+            dests.append(dest)
+            self.log.emit(tr("log_complete", path=dest))
+        if os.path.exists(data['temp_raw']):
+            os.remove(data['temp_raw'])
+        self.item_finished.emit(self.item, dests[0])
+        return True
 
     def _handle_cancelled(self, data, temp_out):
         # ダウンロード後にキャンセルされた場合は中間ファイルを掃除する
@@ -1328,6 +1389,9 @@ class SettingsDialog(QDialog):
         self.name_template_ctrl.setPlaceholderText("{title} - {uploader}")
         name_row.addWidget(self.name_template_ctrl, 1)
         out_layout.addLayout(name_row)
+        template_note = QLabel(tr("template_note"))
+        template_note.setObjectName("muted")
+        out_layout.addWidget(template_note)
         out_layout.addStretch()
         tabs.addTab(output_tab, tr("tab_output"))
 
@@ -1348,9 +1412,22 @@ class SettingsDialog(QDialog):
         lufs_row.addWidget(self.lufs_spin)
         lufs_row.addStretch()
         proc_layout.addLayout(lufs_row)
+        tp_row = QHBoxLayout()
+        tp_row.addWidget(QLabel(tr("tp_label")))
+        self.tp_spin = QDoubleSpinBox()
+        self.tp_spin.setRange(-5.0, 0.0)
+        self.tp_spin.setSingleStep(0.5)
+        self.tp_spin.setDecimals(1)
+        self.tp_spin.setValue(float(self.config.get("loudnorm_tp", -2.0)))
+        tp_row.addWidget(self.tp_spin)
+        tp_row.addStretch()
+        proc_layout.addLayout(tp_row)
         self.meta_cb = QCheckBox(tr("meta_cb"))
         self.meta_cb.setChecked(self.config["embed_metadata"])
         proc_layout.addWidget(self.meta_cb)
+        self.lyrics_cb = QCheckBox(tr("embed_lyrics_cb"))
+        self.lyrics_cb.setChecked(self.config.get("embed_lyrics", False))
+        proc_layout.addWidget(self.lyrics_cb)
         self.trim_cb = QCheckBox(tr("trim_cb"))
         self.trim_cb.setChecked(self.config.get("trim_silence", False))
         proc_layout.addWidget(self.trim_cb)
@@ -1367,6 +1444,9 @@ class SettingsDialog(QDialog):
         fade_row.addWidget(self.fade_spin)
         fade_row.addStretch()
         proc_layout.addLayout(fade_row)
+        self.split_cb = QCheckBox(tr("split_chapters_cb"))
+        self.split_cb.setChecked(self.config.get("split_chapters", False))
+        proc_layout.addWidget(self.split_cb)
         proc_layout.addStretch()
         self.on_normalize_toggle()
         tabs.addTab(proc_tab, tr("tab_processing"))
@@ -1501,8 +1581,11 @@ class SettingsDialog(QDialog):
         self.config["bitrate"] = self.br_combo.currentText()
         self.config["output_folder"] = self.folder_ctrl.text()
         self.config["target_lufs"] = self.lufs_spin.value()
+        self.config["loudnorm_tp"] = self.tp_spin.value()
         self.config["normalize"] = self.normalize_cb.isChecked()
         self.config["embed_metadata"] = self.meta_cb.isChecked()
+        self.config["embed_lyrics"] = self.lyrics_cb.isChecked()
+        self.config["split_chapters"] = self.split_cb.isChecked()
         self.config["trim_silence"] = self.trim_cb.isChecked()
         self.config["fade_enabled"] = self.fade_cb.isChecked()
         self.config["fade_seconds"] = self.fade_spin.value()
