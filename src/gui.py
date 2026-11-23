@@ -6,6 +6,7 @@ wxPython 版から移行した GUI。見た目は QSS（Qt Style Sheets）で
 """
 import os
 import re
+import subprocess
 import sys
 import urllib.request
 import winsound
@@ -159,7 +160,18 @@ TEXTS = {
     "select": {"ja": "選択", "en": "Select"},
     "tab_general": {"ja": "一般", "en": "General"},
     "language_label": {"ja": "言語", "en": "Language"},
-    "max_parallel_label": {"ja": "同時ダウンロード数（1〜5）", "en": "Parallel downloads (1-5)"},
+    "max_parallel_label": {"ja": "同時ダウンロード数（1〜10）", "en": "Parallel downloads (1-10)"},
+    "retry_failed": {"ja": "失敗を再試行", "en": "Retry Failed"},
+    "log_duplicate_skipped": {"ja": "ダウンロード済みのためスキップしました: {name}", "en": "Already downloaded, skipped: {name}"},
+    "log_retry_failed": {"ja": "失敗した {n} 件を再試行します", "en": "Retrying {n} failed item(s)"},
+    "status_done_with_failed": {"ja": "完了（失敗 {n} 件が残っています）", "en": "Done ({n} failed item(s) remain)"},
+    "skip_dup_cb": {"ja": "ダウンロード済みの動画はキューに追加しない", "en": "Do not queue videos that were already downloaded"},
+    "after_finish_label": {"ja": "全て完了したら:", "en": "When all downloads finish:"},
+    "after_finish_": {"ja": "何もしない", "en": "Do nothing"},
+    "after_finish_sleep": {"ja": "スリープ", "en": "Sleep"},
+    "after_finish_shutdown": {"ja": "シャットダウン（30秒後）", "en": "Shut down (in 30 seconds)"},
+    "log_after_finish": {"ja": "全て完了したため、{action}を実行します", "en": "All downloads finished; performing: {action}"},
+    "log_after_finish_failed": {"ja": "完了後アクションに失敗しました: {err}", "en": "After-finish action failed: {err}"},
     "parallel_pro_note": {"ja": "※3以上は Pro ライセンスが必要です（未登録の場合は2まで有効）", "en": "3 or more requires a Pro license (capped at 2 without one)."},
     "license_label": {"ja": "Pro ライセンスキー", "en": "Pro license key"},
     "license_check": {"ja": "確認", "en": "Check"},
@@ -620,6 +632,7 @@ class VibeDLFrame(QMainWindow):
         if self.pro:
             self.setWindowTitle("VibeDL - Audio Downloader Pro")
         self.last_dest_path = None
+        self._batch_success = False
         self.download_history = load_download_history()
         self._bg_threads = set()
         self.setAcceptDrops(True)
@@ -700,6 +713,10 @@ class VibeDLFrame(QMainWindow):
         self.clear_queue_btn = QPushButton(tr("clear_queue"))
         self.clear_queue_btn.clicked.connect(self.on_clear_queue)
         btn_row.addWidget(self.clear_queue_btn)
+        self.retry_failed_btn = QPushButton(tr("retry_failed"))
+        self.retry_failed_btn.clicked.connect(self.on_retry_failed)
+        self.retry_failed_btn.setEnabled(False)
+        btn_row.addWidget(self.retry_failed_btn)
         self.cancel_btn = QPushButton(tr("cancel"))
         self.cancel_btn.setToolTip(tr("cancel_tip"))
         self.cancel_btn.clicked.connect(self.on_cancel_downloads)
@@ -895,8 +912,23 @@ class VibeDLFrame(QMainWindow):
         self._bg_threads.add(thread)
         thread.finished.connect(lambda: self._bg_threads.discard(thread))
 
+    @staticmethod
+    def _video_key(url):
+        """URL表記の違いを吸収するため、動画IDが取れればそれを比較キーにする。"""
+        m = re.search(r'(?:v=|youtu\.be/|/shorts/|/live/)([\w-]{11})',
+                      url or '')
+        return m.group(1) if m else (url or '')
+
     def _add_item(self, url, start_sec, end_sec, title=None, duration=None,
                   thumb_url=None, fetch_info=True):
+        if self.config.get("skip_duplicates"):
+            key = self._video_key(url)
+            known = {self._video_key(e.get('url', ''))
+                     for e in self.download_history}
+            known |= {self._video_key(i.url) for i in self.queue}
+            if key in known:
+                self.log(tr("log_duplicate_skipped", name=title or url))
+                return None
         item = QueueItem(url, start_sec, end_sec)
         item.title = title
         item.duration = duration
@@ -995,7 +1027,8 @@ class VibeDLFrame(QMainWindow):
 
     def update_queue_display(self):
         self.queue_list.clear()
-        icons = {"waiting": "⏳", "downloading": "⬇️", "done": "✅"}
+        icons = {"waiting": "⏳", "downloading": "⬇️", "done": "✅",
+                 "failed": "❌"}
         for item in self.queue:
             label = item.title or item.url
             if item.duration:
@@ -1010,6 +1043,8 @@ class VibeDLFrame(QMainWindow):
             self.queue_list.addItem(list_item)
         has_waiting = any(item.status == "waiting" for item in self.queue)
         self.start_queue_btn.setEnabled(has_waiting)
+        self.retry_failed_btn.setEnabled(
+            any(item.status == "failed" for item in self.queue))
 
     def _on_queue_rows_moved(self, *args):
         """ドラッグ並べ替え後の表示順を self.queue に反映する。"""
@@ -1075,14 +1110,18 @@ class VibeDLFrame(QMainWindow):
 
     def on_item_completed(self, item, dest_path):
         if item in self.queue:
-            item.status = "done"
             if dest_path:
+                item.status = "done"
                 self.last_dest_path = dest_path
                 self.open_folder_btn.setEnabled(True)
                 self.play_btn.setEnabled(True)
                 self._record_download_history(item, dest_path)
                 self.notify_user(tr("notify_complete"), os.path.basename(dest_path))
-            self.queue.remove(item)
+                self.queue.remove(item)
+                self._batch_success = True
+            else:
+                # 失敗したアイテムはキューに残し、再試行できるようにする
+                item.status = "failed"
         sender = self.sender()
         if sender in self.active_workers:
             self.active_workers.remove(sender)
@@ -1092,10 +1131,44 @@ class VibeDLFrame(QMainWindow):
         elif not self.active_workers:
             self.cancel_btn.setEnabled(False)
             self.progress.setValue(100)
-            self.status_label.setText(tr("status_done"))
+            failed_n = sum(1 for i in self.queue if i.status == "failed")
+            if failed_n:
+                self.status_label.setText(
+                    tr("status_done_with_failed", n=failed_n))
+            else:
+                self.status_label.setText(tr("status_done"))
+                self._run_after_finish_action()
+
+    def on_retry_failed(self):
+        failed = [i for i in self.queue if i.status == "failed"]
+        if not failed:
+            return
+        for item in failed:
+            item.status = "waiting"
+        self.log(tr("log_retry_failed", n=len(failed)))
+        self.update_queue_display()
+        self.start_queue()
+
+    def _run_after_finish_action(self):
+        action = self.config.get("after_finish", "")
+        if action not in ("sleep", "shutdown") or not self._batch_success:
+            return
+        self._batch_success = False
+        self.log(tr("log_after_finish",
+                    action=tr("after_finish_" + action)))
+        try:
+            if action == "sleep":
+                subprocess.run(
+                    ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+                    check=False)
+            else:
+                subprocess.run(["shutdown", "/s", "/t", "30"], check=False)
+        except OSError as e:
+            self.log(tr("log_after_finish_failed", err=e))
 
     def on_clear_queue(self):
-        self.queue = [i for i in self.queue if i.status != "waiting"]
+        self.queue = [i for i in self.queue
+                      if i.status not in ("waiting", "failed")]
         self.update_queue_display()
         self.log(tr("queue_cleared"))
 
@@ -1473,6 +1546,23 @@ class SettingsDialog(QDialog):
         self.clipboard_cb = QCheckBox(tr("clipboard_cb"))
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
+        self.skip_dup_cb = QCheckBox(tr("skip_dup_cb"))
+        self.skip_dup_cb.setChecked(self.config.get("skip_duplicates", False))
+        general_layout.addWidget(self.skip_dup_cb)
+        after_row = QHBoxLayout()
+        after_row.addWidget(QLabel(tr("after_finish_label")))
+        self.after_combo = QComboBox()
+        self.after_combo.addItems([tr("after_finish_"),
+                                   tr("after_finish_sleep"),
+                                   tr("after_finish_shutdown")])
+        self._after_values = ["", "sleep", "shutdown"]
+        current_after = self.config.get("after_finish", "")
+        self.after_combo.setCurrentIndex(
+            self._after_values.index(current_after)
+            if current_after in self._after_values else 0)
+        after_row.addWidget(self.after_combo)
+        after_row.addStretch()
+        general_layout.addLayout(after_row)
         cookie_row = QHBoxLayout()
         cookie_row.addWidget(QLabel(tr("cookies_label")))
         self.cookies_combo = QComboBox()
@@ -1509,7 +1599,7 @@ class SettingsDialog(QDialog):
         parallel_row = QHBoxLayout()
         parallel_row.addWidget(QLabel(tr("max_parallel_label")))
         self.parallel_spin = QSpinBox()
-        self.parallel_spin.setRange(1, 5)
+        self.parallel_spin.setRange(1, 10)
         self.parallel_spin.setValue(
             max(1, min(5, int(self.config.get("max_parallel", 2)))))
         parallel_row.addWidget(self.parallel_spin)
@@ -1593,6 +1683,9 @@ class SettingsDialog(QDialog):
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
+        self.config["skip_duplicates"] = self.skip_dup_cb.isChecked()
+        self.config["after_finish"] = \
+            self._after_values[self.after_combo.currentIndex()]
         self.config["cookies_browser"] = ["", "chrome", "edge", "firefox"][self.cookies_combo.currentIndex()]
         self.config["cookies_file"] = self.cookies_file_ctrl.text().strip()
         self.config["language"] = ["ja", "en"][self.language_combo.currentIndex()]
