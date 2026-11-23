@@ -172,6 +172,10 @@ TEXTS = {
     "after_finish_shutdown": {"ja": "シャットダウン（30秒後）", "en": "Shut down (in 30 seconds)"},
     "log_after_finish": {"ja": "全て完了したため、{action}を実行します", "en": "All downloads finished; performing: {action}"},
     "log_after_finish_failed": {"ja": "完了後アクションに失敗しました: {err}", "en": "After-finish action failed: {err}"},
+    "auto_retry_label": {"ja": "失敗時の自動リトライ回数（0〜3）", "en": "Auto-retry on failure (0-3)"},
+    "log_auto_retry": {"ja": "自動リトライ {n}/{max}: {name}", "en": "Auto-retry {n}/{max}: {name}"},
+    "rate_limit_label": {"ja": "速度制限 MB/s（0=無制限）", "en": "Rate limit MB/s (0 = unlimited)"},
+    "history_search_ph": {"ja": "タイトルで検索", "en": "Search by title"},
     "parallel_pro_note": {"ja": "※3以上は Pro ライセンスが必要です（未登録の場合は2まで有効）", "en": "3 or more requires a Pro license (capped at 2 without one)."},
     "license_label": {"ja": "Pro ライセンスキー", "en": "Pro license key"},
     "license_check": {"ja": "確認", "en": "Check"},
@@ -316,6 +320,7 @@ class QueueItem:
         self.duration = None
         self.thumb_url = None
         self.thumb_data = None  # サムネイル画像のバイト列
+        self.retry_count = 0
 
 
 class DownloadCancelled(Exception):
@@ -375,6 +380,10 @@ class DownloadWorker(QThread):
                     pro and self.config.get("embed_lyrics")
                     and self.config.get("embed_metadata")),
                 allow_folders=pro,
+                ratelimit=(int(float(self.config.get("rate_limit_mbps", 0))
+                               * 1024 * 1024)
+                           if float(self.config.get("rate_limit_mbps", 0)) > 0
+                           else None),
             )
             self.log.emit(tr("log_dl_done"))
             chapters = data.get('chapters') or []
@@ -1119,8 +1128,17 @@ class VibeDLFrame(QMainWindow):
                 self.queue.remove(item)
                 self._batch_success = True
             else:
-                # 失敗したアイテムはキューに残し、再試行できるようにする
-                item.status = "failed"
+                # 自動リトライの上限内なら待ちに戻し、上限を超えたら
+                # 失敗としてキューに残す（手動の再試行ボタンで再開できる）
+                max_retry = int(self.config.get("auto_retry", 0))
+                if item.retry_count < max_retry:
+                    item.retry_count += 1
+                    item.status = "waiting"
+                    self.log(tr("log_auto_retry",
+                                name=item.title or item.url,
+                                n=item.retry_count, max=max_retry))
+                else:
+                    item.status = "failed"
         sender = self.sender()
         if sender in self.active_workers:
             self.active_workers.remove(sender)
@@ -1144,6 +1162,7 @@ class VibeDLFrame(QMainWindow):
             return
         for item in failed:
             item.status = "waiting"
+            item.retry_count = 0
         self.log(tr("log_retry_failed", n=len(failed)))
         self.update_queue_display()
         self.start_queue()
@@ -1366,6 +1385,10 @@ class HistoryDialog(QDialog):
         self.resize(660, 440)
 
         layout = QVBoxLayout(self)
+        self.search_ctrl = QLineEdit()
+        self.search_ctrl.setPlaceholderText(tr("history_search_ph"))
+        self.search_ctrl.textChanged.connect(self._filter_history)
+        layout.addWidget(self.search_ctrl)
         self.list_widget = QListWidget()
         for entry in entries:
             text = f"{entry.get('title', '')}  ―  {entry.get('date', '')}"
@@ -1390,6 +1413,16 @@ class HistoryDialog(QDialog):
         close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+
+    def _filter_history(self, text):
+        needle = (text or "").lower()
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            entry = item.data(Qt.UserRole)
+            if not isinstance(entry, dict):
+                continue
+            item.setHidden(
+                needle not in (entry.get('title', '') or '').lower())
 
     def _selected_entry(self):
         item = self.list_widget.currentItem()
@@ -1433,7 +1466,7 @@ class SettingsDialog(QDialog):
         fmt_row = QHBoxLayout()
         fmt_row.addWidget(QLabel(tr("format_label")))
         self.fmt_combo = QComboBox()
-        self.fmt_combo.addItems(["mp3", "m4a", "wav", "flac"])
+        self.fmt_combo.addItems(["mp3", "m4a", "wav", "flac", "opus"])
         self.fmt_combo.setCurrentText(self.config["output_format"])
         fmt_row.addWidget(self.fmt_combo, 1)
         out_layout.addLayout(fmt_row)
@@ -1607,6 +1640,24 @@ class SettingsDialog(QDialog):
         parallel_note = QLabel(tr("parallel_pro_note"))
         parallel_note.setObjectName("muted")
         general_layout.addWidget(parallel_note)
+        retry_row = QHBoxLayout()
+        retry_row.addWidget(QLabel(tr("auto_retry_label")))
+        self.retry_spin = QSpinBox()
+        self.retry_spin.setRange(0, 3)
+        self.retry_spin.setValue(int(self.config.get("auto_retry", 0)))
+        retry_row.addWidget(self.retry_spin)
+        retry_row.addStretch()
+        general_layout.addLayout(retry_row)
+        rate_row = QHBoxLayout()
+        rate_row.addWidget(QLabel(tr("rate_limit_label")))
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0.0, 100.0)
+        self.rate_spin.setSingleStep(0.5)
+        self.rate_spin.setDecimals(1)
+        self.rate_spin.setValue(float(self.config.get("rate_limit_mbps", 0)))
+        rate_row.addWidget(self.rate_spin)
+        rate_row.addStretch()
+        general_layout.addLayout(rate_row)
         license_row = QHBoxLayout()
         license_row.addWidget(QLabel(tr("license_label")))
         self.license_ctrl = QLineEdit(self.config.get("license_key", ""))
@@ -1689,6 +1740,8 @@ class SettingsDialog(QDialog):
         self.config["cookies_file"] = self.cookies_file_ctrl.text().strip()
         self.config["language"] = ["ja", "en"][self.language_combo.currentIndex()]
         self.config["max_parallel"] = self.parallel_spin.value()
+        self.config["auto_retry"] = self.retry_spin.value()
+        self.config["rate_limit_mbps"] = self.rate_spin.value()
         self.config["license_key"] = self.license_ctrl.text().strip()
         self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
