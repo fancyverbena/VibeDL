@@ -8,13 +8,16 @@ import os
 import re
 import subprocess
 import sys
+import time
 import webbrowser
 import urllib.request
 import winsound
 from datetime import datetime
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import (
+    QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -158,6 +161,18 @@ TEXTS = {
     "toast_cb": {"ja": "完了時にトースト通知を表示", "en": "Show a toast notification when finished"},
     "tab_notif": {"ja": "通知", "en": "Notifications"},
     "dark_cb": {"ja": "ダークモード", "en": "Dark mode"},
+    "theme_label": {"ja": "テーマ", "en": "Theme"},
+    "theme_light": {"ja": "ライト", "en": "Light"},
+    "theme_dark": {"ja": "ダーク", "en": "Dark"},
+    "theme_system": {"ja": "システムに合わせる", "en": "Follow system"},
+    "tray_cb": {"ja": "閉じるボタンでタスクトレイに格納", "en": "Minimize to tray on close"},
+    "tray_show": {"ja": "表示", "en": "Show"},
+    "tray_quit": {"ja": "終了", "en": "Quit"},
+    "tray_minimized": {"ja": "タスクトレイに格納しました（ダウンロードは継続します）", "en": "Minimized to tray (downloads continue)"},
+    "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
+    "status_overall": {"ja": "全体 {pct}%", "en": "Overall {pct}%"},
+    "status_overall_eta": {"ja": "全体 {pct}% ・ 残り約 {eta}", "en": "Overall {pct}% · about {eta} left"},
+    "ctx_remove_selected": {"ja": "選択を削除", "en": "Remove selected"},
     "clipboard_cb": {"ja": "クリップボードを監視してURLを自動入力", "en": "Monitor clipboard and auto-fill URLs"},
     "cookies_label": {"ja": "ブラウザCookie（年齢制限など用）", "en": "Browser cookies (for age-restricted videos)"},
     "cookies_none": {"ja": "使用しない", "en": "None"},
@@ -675,17 +690,45 @@ class VibeDLFrame(QMainWindow):
             self.setWindowTitle("VibeDL - Audio Downloader Pro")
         self.last_dest_path = None
         self._batch_success = False
+        self._batch_total = 0
+        self._batch_done = 0
+        self._batch_start = None
+        self._really_quit = False
+        # 前回のウィンドウ位置・サイズを復元
+        try:
+            _w = int(self.config.get("window_w", 0))
+            _h = int(self.config.get("window_h", 0))
+            if _w > 0 and _h > 0:
+                self.resize(_w, _h)
+            _x = int(self.config.get("window_x", -1))
+            _y = int(self.config.get("window_y", -1))
+            if _x >= 0 and _y >= 0:
+                self.move(_x, _y)
+        except (TypeError, ValueError):
+            pass
         self.download_history = load_download_history()
         self._bg_threads = set()
         self.setAcceptDrops(True)
 
         self._init_ui()
         self.apply_theme()
+        try:
+            QApplication.instance().styleHints().colorSchemeChanged.connect(
+                lambda *_: self.apply_theme())
+        except Exception:
+            pass
         self.update_settings_display()
         self._restore_queue()
 
         self.tray = QSystemTrayIcon(make_app_icon(), self)
         self.tray.show()
+        tray_menu = QMenu(self)
+        tray_show = tray_menu.addAction(tr("tray_show"))
+        tray_show.triggered.connect(self._show_from_tray)
+        tray_quit = tray_menu.addAction(tr("tray_quit"))
+        tray_quit.triggered.connect(self._quit_from_tray)
+        self.tray.setContextMenu(tray_menu)
+        self.tray.activated.connect(self._on_tray_activated)
 
         self.clipboard_timer = QTimer(self)
         self.clipboard_timer.timeout.connect(self.on_clipboard_timer)
@@ -788,9 +831,6 @@ class VibeDLFrame(QMainWindow):
         self.history_btn.setToolTip(tr("history_tip"))
         self.history_btn.clicked.connect(self.on_show_history)
         btn_row2.addWidget(self.history_btn)
-        self.settings_btn = QPushButton(tr("settings"))
-        self.settings_btn.clicked.connect(self.on_settings)
-        btn_row2.addWidget(self.settings_btn)
         btn_row2.addStretch()
         card_layout.addLayout(btn_row2)
         root.addWidget(card)
@@ -810,8 +850,13 @@ class VibeDLFrame(QMainWindow):
         self.queue_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.queue_list.setDefaultDropAction(Qt.MoveAction)
         self.queue_list.model().rowsMoved.connect(self._on_queue_rows_moved)
+        self.queue_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.queue_list.setFixedHeight(110)
         card2_layout.addWidget(self.queue_list)
+        self.queue_empty_label = QLabel(tr("queue_empty_hint"), self.queue_list)
+        self.queue_empty_label.setAlignment(Qt.AlignCenter)
+        self.queue_empty_label.setObjectName("muted")
+        self.queue_empty_label.setWordWrap(True)
         self.progress = QProgressBar()
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
@@ -829,6 +874,23 @@ class VibeDLFrame(QMainWindow):
         card3_layout.addWidget(self.log_ctrl)
         root.addWidget(card3, 1)
 
+        # 下部バー: 設定ボタンは左下に配置（よくあるアプリのレイアウト）
+        bottom_bar = QHBoxLayout()
+        self.settings_btn = QPushButton(tr("settings"))
+        self.settings_btn.clicked.connect(self.on_settings)
+        bottom_bar.addWidget(self.settings_btn)
+        bottom_bar.addStretch()
+        root.addLayout(bottom_bar)
+
+        # ショートカット: Ctrl+Enter でキュー開始、Delete で選択削除
+        start_sc = QShortcut(QKeySequence("Ctrl+Return"), self)
+        start_sc.activated.connect(self.on_start_queue)
+        start_sc2 = QShortcut(QKeySequence("Ctrl+Enter"), self)
+        start_sc2.activated.connect(self.on_start_queue)
+        del_sc = QShortcut(QKeySequence("Delete"), self.queue_list)
+        del_sc.setContext(Qt.WidgetShortcut)
+        del_sc.activated.connect(self._remove_selected_items)
+
         status = self.statusBar()
         self.status_fmt = QLabel()
         self.status_norm = QLabel()
@@ -836,10 +898,22 @@ class VibeDLFrame(QMainWindow):
         status.addWidget(self.status_fmt, 2)
         status.addWidget(self.status_norm, 2)
         status.addWidget(self.status_meta, 1)
+        self.status_overall = QLabel("")
+        status.addWidget(self.status_overall, 2)
 
     # ---------- テーマ・表示 ----------
     def apply_theme(self):
-        dark = self.config.get("dark_mode", False)
+        mode = self.config.get("theme_mode") or (
+            "dark" if self.config.get("dark_mode", False) else "light")
+        if mode == "system":
+            dark = False
+            try:
+                dark = (QApplication.instance().styleHints().colorScheme()
+                        == Qt.ColorScheme.Dark)
+            except Exception:
+                pass
+        else:
+            dark = mode == "dark"
         QApplication.instance().setStyleSheet(build_stylesheet(dark))
 
     def update_settings_display(self):
@@ -862,6 +936,7 @@ class VibeDLFrame(QMainWindow):
             parts.append(tr("eta", eta=eta))
         if parts:
             self.status_label.setText("  ".join(parts))
+        self._update_overall_status(percent / 100.0)
 
     def set_status_label(self, text):
         self.status_label.setText(text)
@@ -1105,6 +1180,12 @@ class VibeDLFrame(QMainWindow):
             self.queue_summary.setText(tr(
                 "queue_summary", n=len(self.queue),
                 dur=format_duration(total_dur) if total_dur else "--:--"))
+        if hasattr(self, "queue_empty_label"):
+            empty = not self.queue
+            self.queue_empty_label.setVisible(empty)
+            if empty:
+                self.queue_empty_label.setGeometry(self.queue_list.rect())
+                self.queue_empty_label.raise_()
 
     def _on_queue_rows_moved(self, *args):
         """ドラッグ並べ替え後の表示順を self.queue に反映する。"""
@@ -1171,6 +1252,13 @@ class VibeDLFrame(QMainWindow):
         act_remove = None
         if item.status in ("waiting", "failed"):
             act_remove = menu.addAction(tr("ctx_remove"))
+        act_remove_sel = None
+        selected = [lw.data(Qt.UserRole)
+                    for lw in self.queue_list.selectedItems()]
+        if len(selected) >= 2 and any(
+                i is not None and i.status in ("waiting", "failed")
+                for i in selected):
+            act_remove_sel = menu.addAction(tr("ctx_remove_selected"))
         action = menu.exec(self.queue_list.mapToGlobal(pos))
         if action == act_copy:
             QApplication.clipboard().setText(item.url)
@@ -1186,6 +1274,20 @@ class VibeDLFrame(QMainWindow):
             self.queue.remove(item)
             self._save_queue()
             self.update_queue_display()
+        elif act_remove_sel is not None and action == act_remove_sel:
+            self._remove_selected_items()
+
+    def _remove_selected_items(self):
+        selected = [lw.data(Qt.UserRole)
+                    for lw in self.queue_list.selectedItems()]
+        targets = [i for i in selected
+                   if i is not None and i.status in ("waiting", "failed")]
+        if not targets:
+            return
+        for i in targets:
+            self.queue.remove(i)
+        self._save_queue()
+        self.update_queue_display()
 
     def on_start_queue(self):
         if not self.queue:
@@ -1199,6 +1301,12 @@ class VibeDLFrame(QMainWindow):
         if not self.active_workers and any(item.status == "waiting" for item in self.queue):
             self.progress.setValue(0)
             self.status_label.setText("")
+            self._batch_total = sum(
+                1 for i in self.queue
+                if i.status in ("waiting", "downloading"))
+            self._batch_done = 0
+            self._batch_start = time.monotonic()
+            self._update_overall_status()
         # 同時数の実効上限: Pro でなければ 2 まで
         limit = self.max_workers if self.pro else min(self.max_workers, 2)
         while len(self.active_workers) < limit:
@@ -1239,6 +1347,8 @@ class VibeDLFrame(QMainWindow):
         elif not self.active_workers:
             self.cancel_btn.setEnabled(False)
             self.status_label.setText(tr("status_cancelled"))
+            self.status_overall.setText("")
+            self._batch_start = None
 
     def on_item_completed(self, item, dest_path):
         if item in self.queue:
@@ -1251,6 +1361,7 @@ class VibeDLFrame(QMainWindow):
                 self.notify_user(tr("notify_complete"), os.path.basename(dest_path))
                 self.queue.remove(item)
                 self._batch_success = True
+                self._batch_done += 1
             else:
                 # 自動リトライの上限内なら待ちに戻し、上限を超えたら
                 # 失敗としてキューに残す（手動の再試行ボタンで再開できる）
@@ -1263,16 +1374,20 @@ class VibeDLFrame(QMainWindow):
                                 n=item.retry_count, max=max_retry))
                 else:
                     item.status = "failed"
+                    self._batch_done += 1
         self._save_queue()
         sender = self.sender()
         if sender in self.active_workers:
             self.active_workers.remove(sender)
         self.update_queue_display()
+        self._update_overall_status()
         if any(i.status == "waiting" for i in self.queue):
             self.start_queue()
         elif not self.active_workers:
             self.cancel_btn.setEnabled(False)
             self.progress.setValue(100)
+            self.status_overall.setText("")
+            self._batch_start = None
             failed_n = sum(1 for i in self.queue if i.status == "failed")
             if failed_n:
                 self.status_label.setText(
@@ -1413,8 +1528,59 @@ class VibeDLFrame(QMainWindow):
             # ダークモードのプレビューで変わった見た目を元に戻す
             self.apply_theme()
 
+    def _update_overall_status(self, frac=0.0):
+        if not hasattr(self, "status_overall"):
+            return
+        if not self._batch_total or self._batch_start is None:
+            self.status_overall.setText("")
+            return
+        done = self._batch_done + frac
+        pct = int(done / self._batch_total * 100)
+        if pct >= 100 and self._batch_done < self._batch_total:
+            pct = 99
+        elapsed = time.monotonic() - self._batch_start
+        if self._batch_done >= 1 and elapsed > 0:
+            remain = (self._batch_total - done) / (self._batch_done / elapsed)
+            if remain > 0:
+                self.status_overall.setText(tr(
+                    "status_overall_eta", pct=pct,
+                    eta=format_duration(int(remain))))
+                return
+        self.status_overall.setText(tr("status_overall", pct=pct))
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self):
+        self._really_quit = True
+        self.close()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._show_from_tray()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "queue_empty_label") \
+                and self.queue_empty_label.isVisible():
+            self.queue_empty_label.setGeometry(self.queue_list.rect())
+
     def closeEvent(self, event):
+        # ウィンドウ位置・サイズを保存
+        self.config["window_x"] = self.x()
+        self.config["window_y"] = self.y()
+        self.config["window_w"] = self.width()
+        self.config["window_h"] = self.height()
         save_config(self.config)
+        if self.config.get("minimize_to_tray", False) \
+                and not self._really_quit:
+            event.ignore()
+            self.hide()
+            self.tray.showMessage(
+                "VibeDL", tr("tray_minimized"), make_app_icon(), 3000)
+            return
         super().closeEvent(event)
 
 
@@ -1681,10 +1847,24 @@ class SettingsDialog(QDialog):
         # 一般タブ
         general_tab = QWidget()
         general_layout = QVBoxLayout(general_tab)
-        self.dark_cb = QCheckBox(tr("dark_cb"))
-        self.dark_cb.setChecked(self.config.get("dark_mode", False))
-        self.dark_cb.toggled.connect(self.on_dark_toggle)
-        general_layout.addWidget(self.dark_cb)
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(QLabel(tr("theme_label")))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([tr("theme_light"), tr("theme_dark"),
+                                   tr("theme_system")])
+        self._theme_values = ["light", "dark", "system"]
+        current_theme = self.config.get("theme_mode") or (
+            "dark" if self.config.get("dark_mode", False) else "light")
+        self.theme_combo.setCurrentIndex(
+            self._theme_values.index(current_theme)
+            if current_theme in self._theme_values else 0)
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
+        theme_row.addWidget(self.theme_combo)
+        theme_row.addStretch()
+        general_layout.addLayout(theme_row)
+        self.tray_cb = QCheckBox(tr("tray_cb"))
+        self.tray_cb.setChecked(self.config.get("minimize_to_tray", False))
+        general_layout.addWidget(self.tray_cb)
         self.clipboard_cb = QCheckBox(tr("clipboard_cb"))
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
@@ -1833,9 +2013,19 @@ class SettingsDialog(QDialog):
     def on_normalize_toggle(self):
         self.lufs_spin.setEnabled(self.normalize_cb.isChecked())
 
-    def on_dark_toggle(self, checked):
+    def on_theme_changed(self, index):
         # 設定ダイアログとメイン画面へ即時プレビュー
-        QApplication.instance().setStyleSheet(build_stylesheet(checked))
+        mode = self._theme_values[index]
+        if mode == "system":
+            dark = False
+            try:
+                dark = (QApplication.instance().styleHints().colorScheme()
+                        == Qt.ColorScheme.Dark)
+            except Exception:
+                pass
+        else:
+            dark = mode == "dark"
+        QApplication.instance().setStyleSheet(build_stylesheet(dark))
 
     def on_browse_folder(self):
         path = QFileDialog.getExistingDirectory(
@@ -1873,7 +2063,10 @@ class SettingsDialog(QDialog):
         self.config["trim_silence"] = self.trim_cb.isChecked()
         self.config["fade_enabled"] = self.fade_cb.isChecked()
         self.config["fade_seconds"] = self.fade_spin.value()
-        self.config["dark_mode"] = self.dark_cb.isChecked()
+        self.config["theme_mode"] = \
+            self._theme_values[self.theme_combo.currentIndex()]
+        self.config["dark_mode"] = self.config["theme_mode"] == "dark"
+        self.config["minimize_to_tray"] = self.tray_cb.isChecked()
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
