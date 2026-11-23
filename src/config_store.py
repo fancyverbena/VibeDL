@@ -144,3 +144,27 @@ def save_download_history(entries):
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_WRITE) as key:
         winreg.SetValueEx(key, "DownloadHistory", 0, winreg.REG_SZ,
                           json.dumps(list(entries)[:50], ensure_ascii=False))
+
+
+def load_queue_items():
+    """保存されたキュー（未完了アイテム）を読み込む。最大200件。"""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+    except FileNotFoundError:
+        return []
+    with key:
+        try:
+            raw = winreg.QueryValueEx(key, "QueueItems")[0]
+            data = json.loads(raw)
+        except (FileNotFoundError, TypeError, ValueError):
+            return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict)][:200]
+
+
+def save_queue_items(entries):
+    """キュー（未完了アイテム）を保存する。最大200件。"""
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_WRITE) as key:
+        winreg.SetValueEx(key, "QueueItems", 0, winreg.REG_SZ,
+                          json.dumps(list(entries)[:200], ensure_ascii=False))

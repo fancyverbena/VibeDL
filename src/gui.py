@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import webbrowser
 import urllib.request
 import winsound
 from datetime import datetime
@@ -17,7 +18,8 @@ from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
     QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit,
     QProgressBar, QProgressDialog, QPushButton, QSpinBox, QTabWidget,
     QVBoxLayout, QWidget, QSystemTrayIcon,
 )
@@ -33,6 +35,7 @@ from audio_processor import (
 )
 from config_store import (
     get_config, save_config, load_download_history, save_download_history,
+    load_queue_items, save_queue_items,
 )
 
 CURRENT_LANG = "ja"
@@ -159,6 +162,11 @@ TEXTS = {
     "cookies_file_ph": {"ja": "cookies.txt のパス（任意）", "en": "Path to cookies.txt (optional)"},
     "select": {"ja": "選択", "en": "Select"},
     "tab_general": {"ja": "一般", "en": "General"},
+    "tab_pro": {"ja": "Pro", "en": "Pro"},
+    "pro_intro": {"ja": "Pro版の機能はこのタブにまとめています。ライセンスキーを入力すると解放されます。",
+                  "en": "Pro features are collected on this tab. Enter a license key to unlock them."},
+    "pro_features_note": {"ja": "並列ダウンロード 3〜10 本（一般タブの「並列ダウンロード数」）と、出力ファイル名テンプレートでのフォルダ分け（出力タブ）も Pro 機能です。",
+                          "en": "Parallel downloads 3-10 (General tab) and subfolders via the output filename template (Output tab) are also Pro features."},
     "language_label": {"ja": "言語", "en": "Language"},
     "max_parallel_label": {"ja": "同時ダウンロード数（1〜10）", "en": "Parallel downloads (1-10)"},
     "retry_failed": {"ja": "失敗を再試行", "en": "Retry Failed"},
@@ -176,6 +184,12 @@ TEXTS = {
     "log_auto_retry": {"ja": "自動リトライ {n}/{max}: {name}", "en": "Auto-retry {n}/{max}: {name}"},
     "rate_limit_label": {"ja": "速度制限 MB/s（0=無制限）", "en": "Rate limit MB/s (0 = unlimited)"},
     "history_search_ph": {"ja": "タイトルで検索", "en": "Search by title"},
+    "ctx_copy_url": {"ja": "URLをコピー", "en": "Copy URL"},
+    "ctx_open_browser": {"ja": "ブラウザで開く", "en": "Open in browser"},
+    "ctx_remove": {"ja": "キューから削除", "en": "Remove from queue"},
+    "ctx_retry": {"ja": "再試行", "en": "Retry"},
+    "log_queue_restored": {"ja": "前回のキューを {n} 件復元しました", "en": "Restored {n} item(s) from the previous queue"},
+    "queue_summary": {"ja": "{n} 件 / 合計 {dur}", "en": "{n} item(s) / total {dur}"},
     "parallel_pro_note": {"ja": "※3以上は Pro ライセンスが必要です（未登録の場合は2まで有効）", "en": "3 or more requires a Pro license (capped at 2 without one)."},
     "license_label": {"ja": "Pro ライセンスキー", "en": "Pro license key"},
     "license_check": {"ja": "確認", "en": "Check"},
@@ -400,8 +414,18 @@ class DownloadWorker(QThread):
                 os.remove(data['dest_path'])
             os.rename(temp_out, data['dest_path'])
 
-            if os.path.exists(data['temp_raw']) and data['temp_raw'] != temp_out:
-                os.remove(data['temp_raw'])
+            # 中間ファイル（生ファイル・_trim・_tmp 等）をすべて掃除する
+            raw_base, raw_ext = os.path.splitext(data['temp_raw'])
+            for leftover in (data['temp_raw'],
+                             f"{raw_base}_trim{raw_ext}",
+                             f"{raw_base}_tmp{raw_ext}",
+                             f"{raw_base}_trim_tmp{raw_ext}"):
+                if leftover != data['dest_path'] \
+                        and os.path.exists(leftover):
+                    try:
+                        os.remove(leftover)
+                    except OSError:
+                        pass
 
             self.log.emit(tr("log_complete", path=data['dest_path']))
             self.item_finished.emit(self.item, data['dest_path'])
@@ -649,6 +673,7 @@ class VibeDLFrame(QMainWindow):
         self._init_ui()
         self.apply_theme()
         self.update_settings_display()
+        self._restore_queue()
 
         self.tray = QSystemTrayIcon(make_app_icon(), self)
         self.tray.show()
@@ -731,35 +756,46 @@ class VibeDLFrame(QMainWindow):
         self.cancel_btn.clicked.connect(self.on_cancel_downloads)
         self.cancel_btn.setEnabled(False)
         btn_row.addWidget(self.cancel_btn)
+        btn_row.addStretch()
+        card_layout.addLayout(btn_row)
+
+        # ボタンが多いので2段目に分ける（狭い画面で見切れないように）
+        btn_row2 = QHBoxLayout()
         self.import_btn = QPushButton(tr("import_btn"))
         self.import_btn.setToolTip(tr("import_tip"))
         self.import_btn.clicked.connect(self.on_import_file)
-        btn_row.addWidget(self.import_btn)
-        btn_row.addStretch()
+        btn_row2.addWidget(self.import_btn)
         self.open_folder_btn = QPushButton(tr("open_folder"))
         self.open_folder_btn.setToolTip(tr("open_folder_tip"))
         self.open_folder_btn.clicked.connect(self.on_open_folder)
         self.open_folder_btn.setEnabled(False)
-        btn_row.addWidget(self.open_folder_btn)
+        btn_row2.addWidget(self.open_folder_btn)
         self.play_btn = QPushButton(tr("play"))
         self.play_btn.setToolTip(tr("play_tip"))
         self.play_btn.clicked.connect(self.on_play_last)
         self.play_btn.setEnabled(False)
-        btn_row.addWidget(self.play_btn)
+        btn_row2.addWidget(self.play_btn)
         self.history_btn = QPushButton(tr("history"))
         self.history_btn.setToolTip(tr("history_tip"))
         self.history_btn.clicked.connect(self.on_show_history)
-        btn_row.addWidget(self.history_btn)
+        btn_row2.addWidget(self.history_btn)
         self.settings_btn = QPushButton(tr("settings"))
         self.settings_btn.clicked.connect(self.on_settings)
-        btn_row.addWidget(self.settings_btn)
-        card_layout.addLayout(btn_row)
+        btn_row2.addWidget(self.settings_btn)
+        btn_row2.addStretch()
+        card_layout.addLayout(btn_row2)
         root.addWidget(card)
 
         # カード2: キュー + 進捗
         card2, card2_layout = make_card()
         card2_layout.addWidget(section_label(tr("section_queue")))
+        self.queue_summary = QLabel("")
+        self.queue_summary.setObjectName("muted")
+        card2_layout.addWidget(self.queue_summary)
         self.queue_list = QListWidget()
+        self.queue_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.queue_list.customContextMenuRequested.connect(
+            self._on_queue_context_menu)
         self.queue_list.setIconSize(QSize(96, 54))
         # ドラッグで並べ替え可能にし、表示順を self.queue に同期する
         self.queue_list.setDragDropMode(QAbstractItemView.InternalMove)
@@ -943,6 +979,7 @@ class VibeDLFrame(QMainWindow):
         item.duration = duration
         item.thumb_url = thumb_url
         self.queue.append(item)
+        self._save_queue()
         self.add_to_history(url)
         self.update_queue_display()
         self.log(tr("added_to_queue", name=title or url))
@@ -1054,6 +1091,11 @@ class VibeDLFrame(QMainWindow):
         self.start_queue_btn.setEnabled(has_waiting)
         self.retry_failed_btn.setEnabled(
             any(item.status == "failed" for item in self.queue))
+        if hasattr(self, "queue_summary"):
+            total_dur = sum(i.duration or 0 for i in self.queue)
+            self.queue_summary.setText(tr(
+                "queue_summary", n=len(self.queue),
+                dur=format_duration(total_dur) if total_dur else "--:--"))
 
     def _on_queue_rows_moved(self, *args):
         """ドラッグ並べ替え後の表示順を self.queue に反映する。"""
@@ -1064,6 +1106,77 @@ class VibeDLFrame(QMainWindow):
                 new_order.append(obj)
         if len(new_order) == len(self.queue):
             self.queue = new_order
+            self._save_queue()
+
+    # ---------- キューの保存・復元 / 右クリックメニュー ----------
+    def _save_queue(self):
+        entries = [{
+            'url': i.url, 'title': i.title, 'duration': i.duration,
+            'thumb_url': i.thumb_url,
+            'start_sec': i.start_sec, 'end_sec': i.end_sec,
+            'status': 'failed' if i.status == 'failed' else 'waiting',
+            'retry_count': i.retry_count,
+        } for i in self.queue]
+        try:
+            save_queue_items(entries)
+        except OSError:
+            pass
+
+    def _restore_queue(self):
+        try:
+            entries = load_queue_items()
+        except OSError:
+            entries = []
+        restored = 0
+        for e in entries:
+            if not e.get('url'):
+                continue
+            item = QueueItem(e['url'], e.get('start_sec'), e.get('end_sec'))
+            item.title = e.get('title')
+            item.duration = e.get('duration')
+            item.thumb_url = e.get('thumb_url')
+            item.status = ('failed' if e.get('status') == 'failed'
+                           else 'waiting')
+            item.retry_count = int(e.get('retry_count', 0))
+            self.queue.append(item)
+            restored += 1
+            if item.thumb_url:
+                self._fetch_thumb(item)
+        if restored:
+            self.update_queue_display()
+            self.log(tr("log_queue_restored", n=restored))
+
+    def _on_queue_context_menu(self, pos):
+        list_item = self.queue_list.itemAt(pos)
+        if list_item is None:
+            return
+        item = list_item.data(Qt.UserRole)
+        if item is None:
+            return
+        menu = QMenu(self)
+        act_copy = menu.addAction(tr("ctx_copy_url"))
+        act_open = menu.addAction(tr("ctx_open_browser"))
+        act_retry = None
+        if item.status == "failed":
+            act_retry = menu.addAction(tr("ctx_retry"))
+        act_remove = None
+        if item.status in ("waiting", "failed"):
+            act_remove = menu.addAction(tr("ctx_remove"))
+        action = menu.exec(self.queue_list.mapToGlobal(pos))
+        if action == act_copy:
+            QApplication.clipboard().setText(item.url)
+        elif action == act_open:
+            webbrowser.open(item.url)
+        elif act_retry is not None and action == act_retry:
+            item.status = "waiting"
+            item.retry_count = 0
+            self._save_queue()
+            self.update_queue_display()
+            self.start_queue()
+        elif act_remove is not None and action == act_remove:
+            self.queue.remove(item)
+            self._save_queue()
+            self.update_queue_display()
 
     def on_start_queue(self):
         if not self.queue:
@@ -1107,6 +1220,7 @@ class VibeDLFrame(QMainWindow):
     def on_item_cancelled(self, item):
         if item in self.queue:
             self.queue.remove(item)
+        self._save_queue()
         sender = self.sender()
         if sender in self.active_workers:
             self.active_workers.remove(sender)
@@ -1140,6 +1254,7 @@ class VibeDLFrame(QMainWindow):
                                 n=item.retry_count, max=max_retry))
                 else:
                     item.status = "failed"
+        self._save_queue()
         sender = self.sender()
         if sender in self.active_workers:
             self.active_workers.remove(sender)
@@ -1164,6 +1279,7 @@ class VibeDLFrame(QMainWindow):
         for item in failed:
             item.status = "waiting"
             item.retry_count = 0
+        self._save_queue()
         self.log(tr("log_retry_failed", n=len(failed)))
         self.update_queue_display()
         self.start_queue()
@@ -1188,6 +1304,7 @@ class VibeDLFrame(QMainWindow):
     def on_clear_queue(self):
         self.queue = [i for i in self.queue
                       if i.status not in ("waiting", "failed")]
+        self._save_queue()
         self.update_queue_display()
         self.log(tr("queue_cleared"))
 
@@ -1518,22 +1635,9 @@ class SettingsDialog(QDialog):
         lufs_row.addWidget(self.lufs_spin)
         lufs_row.addStretch()
         proc_layout.addLayout(lufs_row)
-        tp_row = QHBoxLayout()
-        tp_row.addWidget(QLabel(tr("tp_label")))
-        self.tp_spin = QDoubleSpinBox()
-        self.tp_spin.setRange(-5.0, 0.0)
-        self.tp_spin.setSingleStep(0.5)
-        self.tp_spin.setDecimals(1)
-        self.tp_spin.setValue(float(self.config.get("loudnorm_tp", -2.0)))
-        tp_row.addWidget(self.tp_spin)
-        tp_row.addStretch()
-        proc_layout.addLayout(tp_row)
         self.meta_cb = QCheckBox(tr("meta_cb"))
         self.meta_cb.setChecked(self.config["embed_metadata"])
         proc_layout.addWidget(self.meta_cb)
-        self.lyrics_cb = QCheckBox(tr("embed_lyrics_cb"))
-        self.lyrics_cb.setChecked(self.config.get("embed_lyrics", False))
-        proc_layout.addWidget(self.lyrics_cb)
         self.trim_cb = QCheckBox(tr("trim_cb"))
         self.trim_cb.setChecked(self.config.get("trim_silence", False))
         proc_layout.addWidget(self.trim_cb)
@@ -1550,11 +1654,7 @@ class SettingsDialog(QDialog):
         fade_row.addWidget(self.fade_spin)
         fade_row.addStretch()
         proc_layout.addLayout(fade_row)
-        self.split_cb = QCheckBox(tr("split_chapters_cb"))
-        self.split_cb.setChecked(self.config.get("split_chapters", False))
-        proc_layout.addWidget(self.split_cb)
         proc_layout.addStretch()
-        self.on_normalize_toggle()
         tabs.addTab(proc_tab, tr("tab_processing"))
 
         # 通知タブ
@@ -1659,6 +1759,16 @@ class SettingsDialog(QDialog):
         rate_row.addWidget(self.rate_spin)
         rate_row.addStretch()
         general_layout.addLayout(rate_row)
+        general_layout.addStretch()
+        tabs.addTab(general_tab, tr("tab_general"))
+
+        # Proタブ（Pro機能をここに集約）
+        pro_tab = QWidget()
+        pro_layout = QVBoxLayout(pro_tab)
+        pro_intro = QLabel(tr("pro_intro"))
+        pro_intro.setObjectName("muted")
+        pro_intro.setWordWrap(True)
+        pro_layout.addWidget(pro_intro)
         license_row = QHBoxLayout()
         license_row.addWidget(QLabel(tr("license_label")))
         self.license_ctrl = QLineEdit(self.config.get("license_key", ""))
@@ -1666,13 +1776,34 @@ class SettingsDialog(QDialog):
         license_check_btn = QPushButton(tr("license_check"))
         license_check_btn.clicked.connect(self._on_license_check)
         license_row.addWidget(license_check_btn)
-        general_layout.addLayout(license_row)
+        pro_layout.addLayout(license_row)
         self.license_status = QLabel("")
         self.license_status.setObjectName("muted")
-        general_layout.addWidget(self.license_status)
+        pro_layout.addWidget(self.license_status)
         self._update_license_status()
-        general_layout.addStretch()
-        tabs.addTab(general_tab, tr("tab_general"))
+        self.split_cb = QCheckBox(tr("split_chapters_cb"))
+        self.split_cb.setChecked(self.config.get("split_chapters", False))
+        pro_layout.addWidget(self.split_cb)
+        self.lyrics_cb = QCheckBox(tr("embed_lyrics_cb"))
+        self.lyrics_cb.setChecked(self.config.get("embed_lyrics", False))
+        pro_layout.addWidget(self.lyrics_cb)
+        tp_row = QHBoxLayout()
+        tp_row.addWidget(QLabel(tr("tp_label")))
+        self.tp_spin = QDoubleSpinBox()
+        self.tp_spin.setRange(-5.0, 0.0)
+        self.tp_spin.setSingleStep(0.5)
+        self.tp_spin.setDecimals(1)
+        self.tp_spin.setValue(float(self.config.get("loudnorm_tp", -2.0)))
+        tp_row.addWidget(self.tp_spin)
+        tp_row.addStretch()
+        pro_layout.addLayout(tp_row)
+        pro_note = QLabel(tr("pro_features_note"))
+        pro_note.setObjectName("muted")
+        pro_note.setWordWrap(True)
+        pro_layout.addWidget(pro_note)
+        pro_layout.addStretch()
+        tabs.addTab(pro_tab, tr("tab_pro"))
+        self.on_normalize_toggle()
 
         layout.addWidget(tabs)
 

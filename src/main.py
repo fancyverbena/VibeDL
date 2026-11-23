@@ -128,8 +128,11 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
         os.remove(data['dest_path'])
     os.rename(temp_out, data['dest_path'])
 
-    if os.path.exists(data['temp_raw']) and data['temp_raw'] != temp_out:
-        os.remove(data['temp_raw'])
+    # 中間ファイル（生ファイル・_tmp 等）をすべて掃除する
+    raw_base, raw_ext = os.path.splitext(data['temp_raw'])
+    for leftover in (data['temp_raw'], f"{raw_base}_tmp{raw_ext}"):
+        if leftover != data['dest_path'] and os.path.exists(leftover):
+            os.remove(leftover)
 
     print(f"\n✨ 正常に完了しました！")
     print(f"保存先: {data['dest_path']}")
