@@ -55,6 +55,8 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
         allow_folders=pro,
         with_subtitles=bool(pro and config.get('embed_lyrics')
                             and config.get('embed_metadata')),
+        ratelimit=(int(float(config.get('rate_limit_mbps', 0)) * 1024 * 1024)
+                   if float(config.get('rate_limit_mbps', 0)) > 0 else None),
     )
 
     # Pro: チャプター分割保存
@@ -237,8 +239,8 @@ def main():
                 config['output_folder'] = new_folder
                 folder_changed = True
 
-            new_format = input(f"出力フォーマット mp3/m4a (現在: {config['output_format']}): ").strip().lower()
-            if new_format in ("mp3", "m4a"):
+            new_format = input(f"出力フォーマット mp3/m4a/wav/flac/opus (現在: {config['output_format']}): ").strip().lower()
+            if new_format in ("mp3", "m4a", "wav", "flac", "opus"):
                 config['output_format'] = new_format
                 folder_changed = True
 

@@ -164,6 +164,8 @@ def _encoder_args(ext, bitrate):
         return ['-c:a', 'flac']
     if ext == '.wav':
         return ['-c:a', 'pcm_s16le']
+    if ext == '.opus':
+        return ['-c:a', 'libopus', '-b:a', bitrate or '160k']
     if bitrate:
         codec = 'aac' if ext == '.m4a' else 'libmp3lame'
         return ['-c:a', codec, '-b:a', bitrate]
@@ -398,6 +400,30 @@ def embed_metadata(file_path, title, artist, thumb_url, lyrics=None):
                 pic.desc = 'Cover'
                 pic.data = img_data
                 audio.add_picture(pic)
+            except requests.exceptions.RequestException:
+                pass
+        audio.save()
+
+    elif ext == '.opus':
+        import base64
+        from mutagen.oggopus import OggOpus
+        audio = OggOpus(file_path)
+        audio['title'] = title
+        audio['artist'] = artist
+        audio['album'] = 'VibeDL'
+        if lyrics:
+            audio['lyrics'] = lyrics
+
+        if thumb_url:
+            try:
+                img_data = requests.get(thumb_url, timeout=10).content
+                pic = Picture()
+                pic.type = 3
+                pic.mime = 'image/jpeg'
+                pic.desc = 'Cover'
+                pic.data = img_data
+                audio['metadata_block_picture'] = [
+                    base64.b64encode(pic.write()).decode('ascii')]
             except requests.exceptions.RequestException:
                 pass
         audio.save()
