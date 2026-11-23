@@ -30,6 +30,8 @@ DEFAULT_CONFIG = {
     "loudnorm_tp": -2.0,
     "skip_duplicates": False,
     "after_finish": "",
+    "auto_retry": 0,
+    "rate_limit_mbps": 0.0,
 }
 
 # config key -> (registry value name, kind)
@@ -58,6 +60,8 @@ _KEY_MAP = {
     "loudnorm_tp": ("LoudnormTP", "float"),
     "skip_duplicates": ("SkipDuplicates", "bool"),
     "after_finish": ("AfterFinish", "str"),
+    "auto_retry": ("AutoRetry", "int"),
+    "rate_limit_mbps": ("RateLimitMbps", "float"),
 }
 
 
