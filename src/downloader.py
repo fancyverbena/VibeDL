@@ -1,8 +1,9 @@
 import yt_dlp
+import glob
 import os
 import re
 import time
-from audio_processor import get_ffmpeg_location
+from audio_processor import get_ffmpeg_location, vtt_to_lyrics
 
 def clean_title(title):
     patterns = [
@@ -96,7 +97,7 @@ def _cookie_opts(cookies_browser=None, cookies_file=None):
         return {'cookiesfrombrowser': (cookies_browser,)}
     return {}
 
-def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}", cookies_browser=None, cookies_file=None):
+def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}", cookies_browser=None, cookies_file=None, with_subtitles=False, allow_folders=False):
     output_dir = os.path.abspath(output_dir)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -139,6 +140,15 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         'remote_components': ['ejs:github'],
     }
 
+    if with_subtitles:
+        # 歌詞埋め込み用に字幕（手動字幕優先・自動字幕も可）を取得する
+        ydl_opts.update({
+            'writesubtitles': True,
+            'writeautomaticsubtitles': True,
+            'subtitleslangs': ['ja.*', 'en.*'],
+            'subtitlesformat': 'vtt',
+        })
+
     # 自動ダウンロード／同梱された FFmpeg を yt-dlp の変換にも使う。
     # これが無いと、PATH に FFmpeg が無い環境では変換が失敗する。
     ffmpeg_location = get_ffmpeg_location()
@@ -176,22 +186,71 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
                 title_clean = clean_title(info.get('title', 'Unknown'))
                 uploader_clean = clean_title(info.get('uploader', 'Unknown'))
                 video_id = info.get('id', '')
-                filename = name_template.format(title=title_clean, uploader=uploader_clean, id=video_id, ext=output_format)
-                filename = re.sub(r'[\\/:*?"<>|]', '', filename)
-                if not filename.strip():
-                    filename = "unknown"
+                try:
+                    rendered = name_template.format(
+                        title=title_clean, uploader=uploader_clean,
+                        id=video_id, ext=output_format,
+                        date=info.get('upload_date') or '')
+                except (KeyError, IndexError, ValueError):
+                    rendered = title_clean
                 if start_sec is not None and end_sec is not None:
                     time_suffix = f" [{format_time(start_sec)}-{format_time(end_sec)}]"
                 else:
                     time_suffix = ""
-                final_dest = get_unique_path(os.path.join(output_dir, f"{filename}{time_suffix}.{output_format}"))
+                if allow_folders:
+                    # テンプレート内の '/' をフォルダ区切りとして扱い、
+                    # セグメントごとに無効文字を取り除く（'..' 等は除外）
+                    segments = []
+                    for seg in rendered.replace('\\', '/').split('/'):
+                        seg = re.sub(r'[\\/:*?"<>|]', '', seg).strip()
+                        if seg and seg not in ('.', '..'):
+                            segments.append(seg)
+                    if not segments:
+                        segments = ["unknown"]
+                    segments[-1] = f"{segments[-1]}{time_suffix}.{output_format}"
+                    final_dest = get_unique_path(
+                        os.path.join(output_dir, *segments))
+                    os.makedirs(os.path.dirname(final_dest), exist_ok=True)
+                else:
+                    filename = re.sub(r'[\\/:*?"<>|]', '', rendered)
+                    if not filename.strip():
+                        filename = "unknown"
+                    final_dest = get_unique_path(os.path.join(
+                        output_dir, f"{filename}{time_suffix}.{output_format}"))
+
+                # 字幕ファイルがあれば歌詞テキストに変換し、元ファイルは消す
+                lyrics = None
+                if with_subtitles:
+                    base_noext = raw_path.rsplit('.', 1)[0]
+                    sub_files = sorted(glob.glob(
+                        glob.escape(base_noext) + '.*.vtt'))
+                    chosen = None
+                    for cand in sub_files:
+                        if '.ja' in os.path.basename(cand):
+                            chosen = cand
+                            break
+                    if chosen is None and sub_files:
+                        chosen = sub_files[0]
+                    if chosen:
+                        try:
+                            with open(chosen, encoding='utf-8') as f:
+                                lyrics = vtt_to_lyrics(f.read())
+                        except OSError:
+                            lyrics = None
+                    for sub_path in sub_files:
+                        try:
+                            os.remove(sub_path)
+                        except OSError:
+                            pass
 
                 return {
                     'temp_raw': raw_path,
                     'dest_path': final_dest,
                     'title': title_clean,
                     'uploader': uploader_clean,
-                    'thumb': info.get('thumbnail')
+                    'thumb': info.get('thumbnail'),
+                    'chapters': info.get('chapters'),
+                    'lyrics': lyrics,
                 }
         except Exception as e:
             if is_cookie_error(e):
