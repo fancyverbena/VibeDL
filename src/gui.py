@@ -1578,6 +1578,45 @@ class VibeDLFrame(QMainWindow):
         self.update_clipboard_monitor()
         self._update_sidebar_pro()
 
+    # ---------- トレイ・全体進捗 ----------
+    def _show_from_tray(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self):
+        self._really_quit = True
+        self.close()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            if self.isVisible():
+                self.hide()
+            else:
+                self._show_from_tray()
+
+    def _update_overall_status(self, frac=0.0):
+        if self._batch_start is None or self._batch_total <= 0:
+            return
+        overall = (self._batch_done + max(0.0, min(1.0, frac))) \
+            / self._batch_total
+        pct = int(overall * 100)
+        if 0 < overall < 1:
+            elapsed = time.monotonic() - self._batch_start
+            eta = elapsed / overall - elapsed
+            self.status_overall.setText(tr(
+                "status_overall_eta", pct=pct, eta=format_duration(eta)))
+        else:
+            self.status_overall.setText(tr("status_overall", pct=pct))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 空キュー案内ラベルの大きさをリストに合わせ直す（起動直後や
+        # リサイズ時に幅がずれて左寄せに見えるのを防ぐ）
+        if hasattr(self, "queue_empty_label"):
+            self.queue_empty_label.setGeometry(self.queue_list.rect())
+
     def closeEvent(self, event):
         # ウィンドウ位置・サイズを保存
         self.config["window_x"] = self.x()
