@@ -1,10 +1,13 @@
 import os
 import sys
-from downloader import download_audio, download_playlist
+from downloader import (
+    download_audio, download_playlist, clean_title, get_unique_path,
+)
 from audio_processor import (
-    normalize_audio, embed_metadata,
+    normalize_audio, embed_metadata, split_into_chapters,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg
 )
+from license_check import is_pro as _license_is_pro
 from config_store import get_config, save_config
 
 if os.name != 'nt':
@@ -39,6 +42,7 @@ def parse_time_to_sec(timestr):
 
 def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
     print("\n[1/3] 解析中...")
+    pro = _license_is_pro(config.get('license_key', ''))
     data = download_audio(
         url,
         config['output_folder'],
@@ -46,8 +50,51 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
         bitrate=config['bitrate'],
         progress_hook=progress_hook,
         start_sec=start_sec,
-        end_sec=end_sec
+        end_sec=end_sec,
+        name_template=config.get('name_template', '{title}'),
+        allow_folders=pro,
+        with_subtitles=bool(pro and config.get('embed_lyrics')
+                            and config.get('embed_metadata')),
     )
+
+    # Pro: チャプター分割保存
+    chapters = data.get('chapters') or []
+    if pro and config.get('split_chapters') and len(chapters) >= 2 \
+            and start_sec is None:
+        parts = split_into_chapters(
+            data['temp_raw'], chapters, ffmpeg_info=ffmpeg_info,
+            bitrate=config['bitrate'])
+        if parts:
+            base, ext = os.path.splitext(data['dest_path'])
+            for part in parts:
+                temp_out = part['path']
+                if config["normalize"]:
+                    normalized = normalize_audio(
+                        temp_out, config['target_lufs'],
+                        ffmpeg_info=ffmpeg_info,
+                        bitrate=config.get('bitrate'),
+                        target_tp=float(config.get('loudnorm_tp', -2.0)))
+                    if normalized:
+                        temp_out = normalized
+                if config["embed_metadata"]:
+                    embed_metadata(temp_out, part['title'],
+                                   data['uploader'], data['thumb'])
+                dest = get_unique_path(
+                    f"{base} [{part['index'] + 1:02d} "
+                    f"{clean_title(part['title'])}]{ext}")
+                if os.path.exists(dest):
+                    os.remove(dest)
+                os.rename(temp_out, dest)
+                part_base, part_ext = os.path.splitext(part['path'])
+                for leftover in (part['path'],
+                                 f"{part_base}_tmp{part_ext}"):
+                    if os.path.exists(leftover):
+                        os.remove(leftover)
+                print(f"保存先: {dest}")
+            if os.path.exists(data['temp_raw']):
+                os.remove(data['temp_raw'])
+            print("\n✨ チャプター分割が完了しました。")
+            return
 
     if not config["normalize"] and not config["embed_metadata"]:
         # 後処理が無い場合も、必ず最終ファイル名へリネームしてから
@@ -63,7 +110,7 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
     if config["normalize"]:
         print(f"[2/3] 音量を最適化中 ({config['target_lufs']} LUFS)...")
         print(f"使用FFmpeg: {ffmpeg_info['source']}モード")
-        normalized = normalize_audio(temp_out, config['target_lufs'], ffmpeg_info=ffmpeg_info, bitrate=config.get('bitrate'))
+        normalized = normalize_audio(temp_out, config['target_lufs'], ffmpeg_info=ffmpeg_info, bitrate=config.get('bitrate'), target_tp=float(config.get('loudnorm_tp', -2.0)) if pro else -2.0)
         if not normalized:
             print("\n❌ 音量調整に失敗しました。FFmpegを確認してください。")
             if os.path.exists(temp_out):
@@ -73,7 +120,7 @@ def process_item(url, config, ffmpeg_info, start_sec=None, end_sec=None):
 
     if config["embed_metadata"]:
         print("[3/3] メタデータを埋め込み中...")
-        embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'])
+        embed_metadata(temp_out, data['title'], data['uploader'], data['thumb'], lyrics=data.get('lyrics'))
 
     if os.path.exists(data['dest_path']):
         os.remove(data['dest_path'])
