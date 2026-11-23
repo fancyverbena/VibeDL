@@ -1,5 +1,5 @@
 PySide6>=6.6
-yt-dlp>=2024.1
-yt-dlp-ejs>=0.3
-mutagen>=1.47
-requests>=2.31
+yt-dlp>=2026.10
+yt-dlp-ejs>=0.8
+mutagen>=1.48
+requests>=2.34
