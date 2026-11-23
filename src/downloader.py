@@ -97,7 +97,7 @@ def _cookie_opts(cookies_browser=None, cookies_file=None):
         return {'cookiesfrombrowser': (cookies_browser,)}
     return {}
 
-def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}", cookies_browser=None, cookies_file=None, with_subtitles=False, allow_folders=False):
+def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="256k", progress_hook=None, start_sec=None, end_sec=None, name_template="{title}", cookies_browser=None, cookies_file=None, with_subtitles=False, allow_folders=False, ratelimit=None):
     output_dir = os.path.abspath(output_dir)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -126,6 +126,11 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'flac',
         })
+    elif output_format == "opus":
+        postprocessors.append({
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'opus',
+        })
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -139,6 +144,9 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
         'js_runtimes': JS_RUNTIMES,
         'remote_components': ['ejs:github'],
     }
+
+    if ratelimit:
+        ydl_opts['ratelimit'] = ratelimit
 
     if with_subtitles:
         # 歌詞埋め込み用に字幕（手動字幕優先・自動字幕も可）を取得する
@@ -177,6 +185,8 @@ def download_audio(url, output_dir="downloads", output_format="mp3", bitrate="25
                     raw_path = raw_path.rsplit('.', 1)[0] + ".wav"
                 elif output_format == "flac":
                     raw_path = raw_path.rsplit('.', 1)[0] + ".flac"
+                elif output_format == "opus":
+                    raw_path = raw_path.rsplit('.', 1)[0] + ".opus"
 
                 # 範囲指定は download_ranges でダウンロード時に適用済み。
                 # 以前はここで長さを推測して -ss 開始時刻 で再トリムしていたが、
