@@ -29,6 +29,8 @@ from downloader import (
     clean_title, get_unique_path,
 )
 from license_check import is_pro as _license_is_pro, parse_license_key
+
+PRO_PURCHASE_URL = "https://buy.stripe.com/aFabJ2c9w9TubQO1GI0co01"
 from audio_processor import (
     normalize_audio, embed_metadata, trim_and_fade, split_into_chapters,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
@@ -193,6 +195,7 @@ TEXTS = {
     "queue_summary": {"ja": "{n} 件 / 合計 {dur}", "en": "{n} item(s) / total {dur}"},
     "parallel_pro_note": {"ja": "※3以上は Pro ライセンスが必要です（未登録の場合は2まで有効）", "en": "3 or more requires a Pro license (capped at 2 without one)."},
     "license_label": {"ja": "Pro ライセンスキー", "en": "Pro license key"},
+    "buy_pro": {"ja": "Pro版を購入（¥500・買い切り）", "en": "Buy Pro (¥500, one-time)"},
     "license_check": {"ja": "確認", "en": "Check"},
     "license_valid": {"ja": "✓ Pro 有効（{name}）", "en": "✓ Pro active ({name})"},
     "license_invalid": {"ja": "未登録、または無効なキーです", "en": "Not registered, or the key is invalid."},
@@ -1787,6 +1790,9 @@ class SettingsDialog(QDialog):
         self.license_status.setObjectName("muted")
         pro_layout.addWidget(self.license_status)
         self._update_license_status()
+        buy_btn = QPushButton(tr("buy_pro"))
+        buy_btn.clicked.connect(lambda: webbrowser.open(PRO_PURCHASE_URL))
+        pro_layout.addWidget(buy_btn)
         self.split_cb = QCheckBox(tr("split_chapters_cb"))
         self.split_cb.setChecked(self.config.get("split_chapters", False))
         pro_layout.addWidget(self.split_cb)
