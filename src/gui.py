@@ -664,14 +664,18 @@ class WatchWorker(QThread):
 
 
 class UpdateCheckThread(QThread):
-    done = Signal(object)
-    failed = Signal(str)
+    done = Signal(object, bool)
+    failed = Signal(str, bool)
+
+    def __init__(self, manual=False, parent=None):
+        super().__init__(parent)
+        self.manual = manual
 
     def run(self):
         try:
-            self.done.emit(fetch_latest_release())
+            self.done.emit(fetch_latest_release(), self.manual)
         except Exception as e:
-            self.failed.emit(str(e))
+            self.failed.emit(str(e), self.manual)
 
 
 def format_duration(seconds):
@@ -1228,18 +1232,25 @@ class VibeDLFrame(QMainWindow):
     def check_for_updates(self, manual=False):
         if getattr(self, "_update_thread", None) is not None \
                 and self._update_thread.isRunning():
+            if manual:
+                # 実行中の自動チェックを手動扱いに昇格させる
+                self._update_thread.manual = True
             return
-        self._update_manual = manual
-        self._update_thread = UpdateCheckThread(self)
+        self._update_thread = UpdateCheckThread(manual, self)
         self._update_thread.done.connect(self._on_update_checked)
         self._update_thread.failed.connect(self._on_update_check_failed)
         self._update_thread.start()
 
-    def _on_update_checked(self, info):
-        manual = getattr(self, "_update_manual", False)
+    def _on_update_checked(self, info, manual=False):
         latest = info.get("version")
+        if latest is None:
+            # タグからバージョンを読めなかったら「最新」とは言わず失敗扱い
+            if manual:
+                QMessageBox.warning(self, tr("update_available_title"),
+                                    tr("update_failed_msg"))
+            return
         current = parse_version(APP_VERSION)
-        if latest and current and latest > current:
+        if current and latest > current:
             answer = QMessageBox.question(
                 self, tr("update_available_title"),
                 tr("update_available_msg", tag=info.get("tag", ""),
@@ -1251,8 +1262,8 @@ class VibeDLFrame(QMainWindow):
                 self, tr("update_available_title"),
                 tr("update_latest_msg", current=APP_VERSION))
 
-    def _on_update_check_failed(self, message):
-        if getattr(self, "_update_manual", False):
+    def _on_update_check_failed(self, message, manual=False):
+        if manual:
             QMessageBox.warning(self, tr("update_available_title"),
                                   tr("update_failed_msg"))
         else:
@@ -1871,6 +1882,11 @@ class VibeDLFrame(QMainWindow):
             self.tray.showMessage(
                 "VibeDL", tr("tray_minimized"), make_app_icon(), 3000)
             return
+        # 実行中のアップデート確認スレッドは、ウィンドウ破棄前に
+        # 終わるのを待つ（取得タイムアウト6秒＋余裕）
+        if getattr(self, "_update_thread", None) is not None \
+                and self._update_thread.isRunning():
+            self._update_thread.wait(8000)
         super().closeEvent(event)
 
 
