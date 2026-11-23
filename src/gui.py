@@ -236,6 +236,19 @@ TEXTS = {
     "tag_saved": {"ja": "タグを保存しました", "en": "Tags saved"},
     "tag_failed": {"ja": "タグの保存に失敗しました", "en": "Failed to save tags"},
     "mirror_label": {"ja": "ミラー出力先（Pro）", "en": "Mirror folder (Pro)"},
+    "split_artist_cb": {"ja": "タイトルを「アーティスト - 曲名」に自動分離してタグ付け（Pro）", "en": "Split 'Artist - Title' into tags automatically (Pro)"},
+    "ctx_error_detail": {"ja": "エラー詳細", "en": "Error details"},
+    "err_advice_login": {"ja": "ログインが必要な動画の可能性があります。設定の「ブラウザCookie」または cookies.txt を設定してみてください。", "en": "This video may require sign-in. Try setting browser cookies or a cookies.txt file in Settings."},
+    "err_advice_private": {"ja": "非公開動画の可能性があります。公開状態を確認してください。", "en": "This video may be private. Check its visibility."},
+    "err_advice_unavailable": {"ja": "動画が削除・非公開になっている可能性があります。", "en": "The video may have been removed or made unavailable."},
+    "err_advice_age": {"ja": "年齢制限のある動画の可能性があります。ブラウザCookieの設定で回避できる場合があります。", "en": "This video may be age-restricted. Browser cookies may help."},
+    "err_advice_format": {"ja": "利用できる形式が見つかりませんでした。時間をおいて再試行するか、別の動画でお試しください。", "en": "No downloadable format was found. Try again later or with another video."},
+    "err_advice_403": {"ja": "アクセスが拒否されました（403）。時間をおくか、ブラウザCookieを設定してみてください。", "en": "Access was denied (403). Wait a while or try browser cookies."},
+    "err_advice_network": {"ja": "通信に失敗しました。ネットワーク接続を確認して再試行してください。", "en": "A network error occurred. Check your connection and retry."},
+    "err_advice_generic": {"ja": "ダウンロードに失敗しました。しばらく待ってから再試行してください。", "en": "The download failed. Please retry after a while."},
+    "export_queue_btn": {"ja": "キュー書き出し", "en": "Export queue"},
+    "export_queue_done": {"ja": "キューのURLを書き出しました（{n}件）", "en": "Exported {n} queue URL(s)"},
+    "downloaded_suffix": {"ja": "DL済み", "en": "Downloaded"},
     "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
     "status_overall": {"ja": "全体 {pct}%", "en": "Overall {pct}%"},
     "status_overall_eta": {"ja": "全体 {pct}% ・ 残り約 {eta}", "en": "Overall {pct}% · about {eta} left"},
@@ -431,6 +444,7 @@ class QueueItem:
         self.thumb_url = None
         self.thumb_data = None  # サムネイル画像のバイト列
         self.retry_count = 0
+        self.error = ""
 
 
 class DownloadCancelled(Exception):
@@ -535,6 +549,7 @@ class DownloadWorker(QThread):
                 self._handle_cancelled(data if 'data' in locals() else None,
                                        temp_out if 'temp_out' in locals() else None)
             else:
+                self.item.error = str(e)
                 self.log.emit(tr("log_error", url=self.item.url, err=e))
                 self.item_finished.emit(self.item, None)
 
@@ -579,8 +594,13 @@ class DownloadWorker(QThread):
         if self.config["embed_metadata"]:
             self.phase.emit(tr("phase_metadata"))
             self.log.emit(tr("log_metadata"))
+            meta_title, meta_artist = title, uploader
+            if pro and self.config.get("split_artist_title"):
+                parsed_artist, parsed_title = parse_artist_title(title)
+                if parsed_artist:
+                    meta_title, meta_artist = parsed_title, parsed_artist
             try:
-                embed_metadata(temp_out, title, uploader, thumb,
+                embed_metadata(temp_out, meta_title, meta_artist, thumb,
                                lyrics=lyrics)
             except Exception as e:
                 # メタデータ失敗で完成したファイルまで失わない
@@ -670,6 +690,41 @@ def fetch_latest_release():
     return {"version": parse_version(data.get("tag_name", "")),
             "tag": data.get("tag_name", ""),
             "url": data.get("html_url", "")}
+
+
+def parse_artist_title(title):
+    """「アーティスト - 曲名」形式なら (アーティスト, 曲名) を返す。
+
+    分離できない場合は (None, title) を返す。
+    """
+    for sep in (" - ", " – ", " — "):
+        if sep in (title or ""):
+            artist, song = title.split(sep, 1)
+            artist, song = artist.strip(), song.strip()
+            if artist and song:
+                return artist, song
+    return None, title
+
+
+def classify_error(message):
+    """エラーメッセージから対処法の TEXTS キーを選ぶ。"""
+    text = message or ""
+    low = text.lower()
+    if "sign in" in low or "login required" in low or "cookies" in low:
+        return "err_advice_login"
+    if "private" in low:
+        return "err_advice_private"
+    if "age" in low or "年齢" in text:
+        return "err_advice_age"
+    if "unavailable" in low or "removed" in low or "deleted" in low:
+        return "err_advice_unavailable"
+    if "format is not available" in low or "requested format" in low:
+        return "err_advice_format"
+    if "403" in low:
+        return "err_advice_403"
+    if "timed out" in low or "timeout" in low or "connection" in low:
+        return "err_advice_network"
+    return "err_advice_generic"
 
 
 def find_new_entries(entries, seen_urls):
@@ -1104,6 +1159,9 @@ class VibeDLFrame(QMainWindow):
         self.import_btn.setToolTip(tr("import_tip"))
         self.import_btn.clicked.connect(self.on_import_file)
         btn_row2.addWidget(self.import_btn)
+        self.export_queue_btn = QPushButton(tr("export_queue_btn"))
+        self.export_queue_btn.clicked.connect(self.on_export_queue)
+        btn_row2.addWidget(self.export_queue_btn)
         self.open_folder_btn = QPushButton(tr("open_folder"))
         self.open_folder_btn.setToolTip(tr("open_folder_tip"))
         self.open_folder_btn.clicked.connect(self.on_open_folder)
@@ -1634,6 +1692,7 @@ class VibeDLFrame(QMainWindow):
             'start_sec': i.start_sec, 'end_sec': i.end_sec,
             'status': 'failed' if i.status == 'failed' else 'waiting',
             'retry_count': i.retry_count,
+            'error': i.error,
         } for i in self.queue]
         try:
             save_queue_items(entries)
@@ -1656,6 +1715,7 @@ class VibeDLFrame(QMainWindow):
             item.status = ('failed' if e.get('status') == 'failed'
                            else 'waiting')
             item.retry_count = int(e.get('retry_count', 0))
+            item.error = e.get('error', '') or ''
             self.queue.append(item)
             restored += 1
             if item.thumb_url:
@@ -1681,8 +1741,10 @@ class VibeDLFrame(QMainWindow):
         act_copy = menu.addAction(tr("ctx_copy_url"))
         act_open = menu.addAction(tr("ctx_open_browser"))
         act_retry = None
+        act_error = None
         if item.status == "failed":
             act_retry = menu.addAction(tr("ctx_retry"))
+            act_error = menu.addAction(tr("ctx_error_detail"))
         act_remove = None
         if item.status in ("waiting", "failed"):
             act_remove = menu.addAction(tr("ctx_remove"))
@@ -1696,6 +1758,8 @@ class VibeDLFrame(QMainWindow):
         action = menu.exec(self.queue_list.mapToGlobal(pos))
         if action == act_preview:
             self.toggle_preview(item)
+        elif act_error is not None and action == act_error:
+            self._show_error_detail(item)
         elif action == act_copy:
             QApplication.clipboard().setText(item.url)
         elif action == act_open:
@@ -1735,6 +1799,14 @@ class VibeDLFrame(QMainWindow):
             QMessageBox.information(self, "VibeDL", tr("convert_pro_only"))
             return
         LocalConvertDialog(self).exec()
+
+    def _show_error_detail(self, item):
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("ctx_error_detail"))
+        box.setText(tr(classify_error(item.error)))
+        if item.error:
+            box.setDetailedText(item.error)
+        box.exec()
 
     # ---------- プレビュー再生 ----------
     def toggle_preview(self, item):
@@ -1994,6 +2066,30 @@ class VibeDLFrame(QMainWindow):
             self._import_text(mime.text())
         event.acceptProposedAction()
 
+    def on_export_queue(self):
+        targets = [i for i in self.queue
+                   if i.status in ("waiting", "failed")]
+        if not targets:
+            QMessageBox.information(self, tr("info_title"),
+                                    tr("queue_empty"))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("export_queue_btn"), "vibedl_queue.txt",
+            tr("filter_text"))
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                for i in targets:
+                    if i.title:
+                        f.write(f"# {i.title}\n")
+                    f.write(f"{i.url}\n")
+        except OSError as e:
+            QMessageBox.warning(self, tr("error_title"),
+                                tr("file_unreadable", err=e))
+            return
+        self.log(tr("export_queue_done", n=len(targets)))
+
     def on_import_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, tr("import_dialog_title"), "", tr("filter_text"))
@@ -2191,10 +2287,24 @@ class SearchDialog(QDialog):
         self._thread.failed.connect(self.on_failed)
         self._thread.start()
 
+    def _downloaded_keys(self):
+        frame = self.parent()
+        keys = set()
+        if frame is not None and hasattr(frame, "download_history"):
+            for e in frame.download_history:
+                key = frame._video_key(e.get("url", ""))
+                if key:
+                    keys.add(key)
+        return keys
+
     def on_results(self, results):
         self.search_btn.setEnabled(True)
+        downloaded = self._downloaded_keys()
         for r in results:
             text = r['title']
+            if self.parent() is not None and \
+                    self.parent()._video_key(r.get("url", "")) in downloaded:
+                text += f"  ✓ {tr('downloaded_suffix')}"
             if r['uploader']:
                 text += f"  ―  {r['uploader']}"
             text += f"  ({format_duration(r['duration'])})"
@@ -2712,6 +2822,10 @@ class SettingsPanel(QWidget):
         self.lyrics_cb = QCheckBox(tr("embed_lyrics_cb"))
         self.lyrics_cb.setChecked(self.config.get("embed_lyrics", False))
         pro_layout.addWidget(self.lyrics_cb)
+        self.artist_split_cb = QCheckBox(tr("split_artist_cb"))
+        self.artist_split_cb.setChecked(
+            self.config.get("split_artist_title", False))
+        pro_layout.addWidget(self.artist_split_cb)
         watch_label = QLabel(tr("watch_label"))
         watch_label.setObjectName("muted")
         watch_label.setWordWrap(True)
@@ -2931,6 +3045,7 @@ class SettingsPanel(QWidget):
         self.config["normalize"] = self.normalize_cb.isChecked()
         self.config["embed_metadata"] = self.meta_cb.isChecked()
         self.config["embed_lyrics"] = self.lyrics_cb.isChecked()
+        self.config["split_artist_title"] = self.artist_split_cb.isChecked()
         self.config["split_chapters"] = self.split_cb.isChecked()
         self.config["trim_silence"] = self.trim_cb.isChecked()
         self.config["fade_enabled"] = self.fade_cb.isChecked()
