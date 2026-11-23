@@ -958,7 +958,9 @@ class VibeDLFrame(QMainWindow):
         self.start_queue()
 
     def start_queue(self):
-        if any(item.status == "waiting" for item in self.queue):
+        # 実行中のワーカーがある場合は進捗表示をリセットしない（設定変更で
+        # 空き枠を埋める場合など、途中での呼び出しに備える）
+        if not self.active_workers and any(item.status == "waiting" for item in self.queue):
             self.progress.setValue(0)
             self.status_label.setText("")
         while len(self.active_workers) < self.max_workers:
@@ -1108,6 +1110,9 @@ class VibeDLFrame(QMainWindow):
             self.config = dlg.get_config()
             save_config(self.config)
             self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
+            # 実行中に上限を上げたら空き枠をすぐ埋める（停止中のキューは動かさない）
+            if self.active_workers:
+                self.start_queue()
             self.apply_theme()
             self.update_settings_display()
             self.update_clipboard_monitor()
