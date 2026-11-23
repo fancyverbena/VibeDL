@@ -162,6 +162,11 @@ TEXTS = {
     "cookies_file_ph": {"ja": "cookies.txt のパス（任意）", "en": "Path to cookies.txt (optional)"},
     "select": {"ja": "選択", "en": "Select"},
     "tab_general": {"ja": "一般", "en": "General"},
+    "tab_pro": {"ja": "Pro", "en": "Pro"},
+    "pro_intro": {"ja": "Pro版の機能はこのタブにまとめています。ライセンスキーを入力すると解放されます。",
+                  "en": "Pro features are collected on this tab. Enter a license key to unlock them."},
+    "pro_features_note": {"ja": "並列ダウンロード 3〜10 本（一般タブの「並列ダウンロード数」）と、出力ファイル名テンプレートでのフォルダ分け（出力タブ）も Pro 機能です。",
+                          "en": "Parallel downloads 3-10 (General tab) and subfolders via the output filename template (Output tab) are also Pro features."},
     "language_label": {"ja": "言語", "en": "Language"},
     "max_parallel_label": {"ja": "同時ダウンロード数（1〜10）", "en": "Parallel downloads (1-10)"},
     "retry_failed": {"ja": "失敗を再試行", "en": "Retry Failed"},
@@ -1630,22 +1635,9 @@ class SettingsDialog(QDialog):
         lufs_row.addWidget(self.lufs_spin)
         lufs_row.addStretch()
         proc_layout.addLayout(lufs_row)
-        tp_row = QHBoxLayout()
-        tp_row.addWidget(QLabel(tr("tp_label")))
-        self.tp_spin = QDoubleSpinBox()
-        self.tp_spin.setRange(-5.0, 0.0)
-        self.tp_spin.setSingleStep(0.5)
-        self.tp_spin.setDecimals(1)
-        self.tp_spin.setValue(float(self.config.get("loudnorm_tp", -2.0)))
-        tp_row.addWidget(self.tp_spin)
-        tp_row.addStretch()
-        proc_layout.addLayout(tp_row)
         self.meta_cb = QCheckBox(tr("meta_cb"))
         self.meta_cb.setChecked(self.config["embed_metadata"])
         proc_layout.addWidget(self.meta_cb)
-        self.lyrics_cb = QCheckBox(tr("embed_lyrics_cb"))
-        self.lyrics_cb.setChecked(self.config.get("embed_lyrics", False))
-        proc_layout.addWidget(self.lyrics_cb)
         self.trim_cb = QCheckBox(tr("trim_cb"))
         self.trim_cb.setChecked(self.config.get("trim_silence", False))
         proc_layout.addWidget(self.trim_cb)
@@ -1662,11 +1654,7 @@ class SettingsDialog(QDialog):
         fade_row.addWidget(self.fade_spin)
         fade_row.addStretch()
         proc_layout.addLayout(fade_row)
-        self.split_cb = QCheckBox(tr("split_chapters_cb"))
-        self.split_cb.setChecked(self.config.get("split_chapters", False))
-        proc_layout.addWidget(self.split_cb)
         proc_layout.addStretch()
-        self.on_normalize_toggle()
         tabs.addTab(proc_tab, tr("tab_processing"))
 
         # 通知タブ
@@ -1771,6 +1759,16 @@ class SettingsDialog(QDialog):
         rate_row.addWidget(self.rate_spin)
         rate_row.addStretch()
         general_layout.addLayout(rate_row)
+        general_layout.addStretch()
+        tabs.addTab(general_tab, tr("tab_general"))
+
+        # Proタブ（Pro機能をここに集約）
+        pro_tab = QWidget()
+        pro_layout = QVBoxLayout(pro_tab)
+        pro_intro = QLabel(tr("pro_intro"))
+        pro_intro.setObjectName("muted")
+        pro_intro.setWordWrap(True)
+        pro_layout.addWidget(pro_intro)
         license_row = QHBoxLayout()
         license_row.addWidget(QLabel(tr("license_label")))
         self.license_ctrl = QLineEdit(self.config.get("license_key", ""))
@@ -1778,13 +1776,34 @@ class SettingsDialog(QDialog):
         license_check_btn = QPushButton(tr("license_check"))
         license_check_btn.clicked.connect(self._on_license_check)
         license_row.addWidget(license_check_btn)
-        general_layout.addLayout(license_row)
+        pro_layout.addLayout(license_row)
         self.license_status = QLabel("")
         self.license_status.setObjectName("muted")
-        general_layout.addWidget(self.license_status)
+        pro_layout.addWidget(self.license_status)
         self._update_license_status()
-        general_layout.addStretch()
-        tabs.addTab(general_tab, tr("tab_general"))
+        self.split_cb = QCheckBox(tr("split_chapters_cb"))
+        self.split_cb.setChecked(self.config.get("split_chapters", False))
+        pro_layout.addWidget(self.split_cb)
+        self.lyrics_cb = QCheckBox(tr("embed_lyrics_cb"))
+        self.lyrics_cb.setChecked(self.config.get("embed_lyrics", False))
+        pro_layout.addWidget(self.lyrics_cb)
+        tp_row = QHBoxLayout()
+        tp_row.addWidget(QLabel(tr("tp_label")))
+        self.tp_spin = QDoubleSpinBox()
+        self.tp_spin.setRange(-5.0, 0.0)
+        self.tp_spin.setSingleStep(0.5)
+        self.tp_spin.setDecimals(1)
+        self.tp_spin.setValue(float(self.config.get("loudnorm_tp", -2.0)))
+        tp_row.addWidget(self.tp_spin)
+        tp_row.addStretch()
+        pro_layout.addLayout(tp_row)
+        pro_note = QLabel(tr("pro_features_note"))
+        pro_note.setObjectName("muted")
+        pro_note.setWordWrap(True)
+        pro_layout.addWidget(pro_note)
+        pro_layout.addStretch()
+        tabs.addTab(pro_tab, tr("tab_pro"))
+        self.on_normalize_toggle()
 
         layout.addWidget(tabs)
 
