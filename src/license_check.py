@@ -13,7 +13,7 @@ import json
 
 from _ed25519_impl import verify as _ed25519_verify
 
-PUBLIC_KEY_B64 = "WzQeaHXbcIHY4v-7QndxfJ_Gu0W8V-tl9XqTB5I8Its"
+PUBLIC_KEY_B64 = "lJLf8Kjgog65O8TASU0aQqOY_leOc-GOQd9C6TCawek"
 PRODUCT = "VibeDL Pro"
 
 
