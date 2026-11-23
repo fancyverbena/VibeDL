@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit,
     QProgressBar, QProgressDialog, QPushButton, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget, QSystemTrayIcon,
+    QVBoxLayout, QWidget, QSystemTrayIcon, QStackedWidget,
 )
 
 from downloader import (
@@ -211,6 +211,8 @@ TEXTS = {
     "parallel_pro_note": {"ja": "※3以上は Pro ライセンスが必要です（未登録の場合は2まで有効）", "en": "3 or more requires a Pro license (capped at 2 without one)."},
     "license_label": {"ja": "Pro ライセンスキー", "en": "Pro license key"},
     "buy_pro": {"ja": "Pro版を購入（¥500・買い切り）", "en": "Buy Pro (¥500, one-time)"},
+    "buy_pro_short": {"ja": "Pro版を購入", "en": "Buy Pro"},
+    "pro_active": {"ja": "✓ Pro 有効", "en": "✓ Pro active"},
     "license_check": {"ja": "確認", "en": "Check"},
     "license_valid": {"ja": "✓ Pro 有効（{name}）", "en": "✓ Pro active ({name})"},
     "license_invalid": {"ja": "未登録、または無効なキーです", "en": "Not registered, or the key is invalid."},
@@ -238,13 +240,13 @@ PALETTES = {
         "bg": "#202228", "surface": "#2B2E35", "entry": "#1C1E23",
         "fg": "#F2F2F2", "muted": "#A7ABB3", "border": "#3A3E47",
         "btn": "#3A3E47", "btn_hover": "#464B57", "track": "#3A3E47",
-        "log_bg": "#181A1E",
+        "log_bg": "#181A1E", "sidebar": "#26282F",
     },
     False: {  # light
         "bg": "#E9EBEF", "surface": "#FFFFFF", "entry": "#FFFFFF",
         "fg": "#1C1E22", "muted": "#6E737A", "border": "#D6D9DE",
         "btn": "#FFFFFF", "btn_hover": "#F0F1F5", "track": "#D6D9DE",
-        "log_bg": "#FFFFFF",
+        "log_bg": "#FFFFFF", "sidebar": "#DEE1E7",
     },
 }
 
@@ -294,13 +296,21 @@ def build_stylesheet(dark):
     QCheckBox { spacing: 8px; }
     QStatusBar { background: @BG@; color: @MUTED@; }
     QToolTip { background: @SURFACE@; color: @FG@; border: 1px solid @BORDER@; padding: 4px; }
+    QFrame#sidebar { background: @SIDEBAR@; border-right: 1px solid @BORDER@; }
+    QPushButton#nav {
+        background: transparent; border: none; text-align: left;
+        padding: 10px 14px; border-radius: 8px; font-size: 11pt;
+    }
+    QPushButton#nav:hover { background: @BTN_HOVER@; }
+    QPushButton#nav:checked { background: @ACCENT@; color: #FFFFFF; font-weight: bold; }
+    QLabel#proBadge { color: @ACCENT@; font-weight: bold; font-size: 11pt; }
     """
     return (qss.replace("@BG@", p["bg"]).replace("@SURFACE@", p["surface"])
             .replace("@ENTRY@", p["entry"]).replace("@FG@", p["fg"])
             .replace("@MUTED@", p["muted"]).replace("@BORDER@", p["border"])
             .replace("@BTN@", p["btn"]).replace("@BTN_HOVER@", p["btn_hover"])
             .replace("@TRACK@", p["track"]).replace("@LOG_BG@", p["log_bg"])
-            .replace("@ACCENT@", ACCENT))
+            .replace("@ACCENT@", ACCENT).replace("@SIDEBAR@", p["sidebar"]))
 
 
 def make_app_icon():
@@ -719,6 +729,7 @@ class VibeDLFrame(QMainWindow):
             pass
         self.update_settings_display()
         self._restore_queue()
+        self.update_queue_display()
 
         self.tray = QSystemTrayIcon(make_app_icon(), self)
         self.tray.show()
@@ -740,19 +751,54 @@ class VibeDLFrame(QMainWindow):
     def _init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        header = QHBoxLayout()
+        # サイドバー
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(190)
+        sb_layout = QVBoxLayout(sidebar)
+        sb_layout.setContentsMargins(14, 16, 14, 14)
+        sb_layout.setSpacing(8)
         title = QLabel(f'<span style="color:{ACCENT}">Vibe</span>DL')
         title.setObjectName("appTitle")
-        header.addWidget(title)
+        sb_layout.addWidget(title)
         subtitle = QLabel("YouTube Audio Downloader")
         subtitle.setObjectName("muted")
-        header.addWidget(subtitle)
-        header.addStretch()
-        root.addLayout(header)
+        sb_layout.addWidget(subtitle)
+        sb_layout.addSpacing(14)
+        self._nav_buttons = []
+        for i, (icon, key) in enumerate([
+                ("⬇", "section_download"), ("🕘", "history"),
+                ("⚙", "settings")]):
+            btn = QPushButton(f"{icon}  {tr(key)}")
+            btn.setObjectName("nav")
+            btn.setCheckable(True)
+            btn.clicked.connect(
+                lambda _=False, idx=i: self._switch_page(idx))
+            sb_layout.addWidget(btn)
+            self._nav_buttons.append(btn)
+        self._nav_buttons[0].setChecked(True)
+        sb_layout.addStretch()
+        self.sidebar_pro_btn = QPushButton(tr("buy_pro_short"))
+        self.sidebar_pro_btn.setObjectName("primary")
+        self.sidebar_pro_btn.clicked.connect(
+            lambda: webbrowser.open(PRO_PURCHASE_URL))
+        sb_layout.addWidget(self.sidebar_pro_btn)
+        self.sidebar_pro_label = QLabel(tr("pro_active"))
+        self.sidebar_pro_label.setObjectName("proBadge")
+        sb_layout.addWidget(self.sidebar_pro_label)
+        main_layout.addWidget(sidebar)
+
+        # ページ側（ダウンロードページのレイアウトを root として構築する）
+        self.pages = QStackedWidget()
+        main_layout.addWidget(self.pages, 1)
+        download_page = QWidget()
+        root = QVBoxLayout(download_page)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
 
         # カード1: 入力 + 操作
         card, card_layout = make_card()
@@ -827,10 +873,6 @@ class VibeDLFrame(QMainWindow):
         self.play_btn.clicked.connect(self.on_play_last)
         self.play_btn.setEnabled(False)
         btn_row2.addWidget(self.play_btn)
-        self.history_btn = QPushButton(tr("history"))
-        self.history_btn.setToolTip(tr("history_tip"))
-        self.history_btn.clicked.connect(self.on_show_history)
-        btn_row2.addWidget(self.history_btn)
         btn_row2.addStretch()
         card_layout.addLayout(btn_row2)
         root.addWidget(card)
@@ -874,14 +916,6 @@ class VibeDLFrame(QMainWindow):
         card3_layout.addWidget(self.log_ctrl)
         root.addWidget(card3, 1)
 
-        # 下部バー: 設定ボタンは左下に配置（よくあるアプリのレイアウト）
-        bottom_bar = QHBoxLayout()
-        self.settings_btn = QPushButton(tr("settings"))
-        self.settings_btn.clicked.connect(self.on_settings)
-        bottom_bar.addWidget(self.settings_btn)
-        bottom_bar.addStretch()
-        root.addLayout(bottom_bar)
-
         # ショートカット: Ctrl+Enter でキュー開始、Delete で選択削除
         start_sc = QShortcut(QKeySequence("Ctrl+Return"), self)
         start_sc.activated.connect(self.on_start_queue)
@@ -900,6 +934,15 @@ class VibeDLFrame(QMainWindow):
         status.addWidget(self.status_meta, 1)
         self.status_overall = QLabel("")
         status.addWidget(self.status_overall, 2)
+
+        # ページを組み立てる（履歴・設定）
+        self.pages.addWidget(download_page)
+        self.history_panel = HistoryPanel(self)
+        self.pages.addWidget(self.history_panel)
+        self.settings_panel = SettingsPanel(self, self.config)
+        self.settings_panel.changed.connect(self._on_settings_panel_changed)
+        self.pages.addWidget(self.settings_panel)
+        self._update_sidebar_pro()
 
     # ---------- テーマ・表示 ----------
     def apply_theme(self):
@@ -1489,10 +1532,6 @@ class VibeDLFrame(QMainWindow):
         if self.last_dest_path and os.path.exists(self.last_dest_path):
             os.startfile(self.last_dest_path)
 
-    def on_show_history(self):
-        dlg = HistoryDialog(self, self.download_history)
-        dlg.exec()
-
     def _record_download_history(self, item, dest_path):
         entry = {
             'title': item.title or os.path.basename(dest_path),
@@ -1510,62 +1549,34 @@ class VibeDLFrame(QMainWindow):
             os.startfile(os.path.dirname(self.last_dest_path))
 
     def on_settings(self):
-        dlg = SettingsDialog(self, self.config)
-        if dlg.exec() == QDialog.Accepted:
-            self.config = dlg.get_config()
-            save_config(self.config)
-            self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
-            self.pro = _license_is_pro(self.config.get("license_key", ""))
-            self.setWindowTitle("VibeDL - Audio Downloader"
-                                + (" Pro" if self.pro else ""))
-            # 実行中に上限を上げたら空き枠をすぐ埋める（停止中のキューは動かさない）
-            if self.active_workers:
-                self.start_queue()
-            self.apply_theme()
-            self.update_settings_display()
-            self.update_clipboard_monitor()
-        else:
-            # ダークモードのプレビューで変わった見た目を元に戻す
-            self.apply_theme()
+        self._switch_page(2)
 
-    def _update_overall_status(self, frac=0.0):
-        if not hasattr(self, "status_overall"):
-            return
-        if not self._batch_total or self._batch_start is None:
-            self.status_overall.setText("")
-            return
-        done = self._batch_done + frac
-        pct = int(done / self._batch_total * 100)
-        if pct >= 100 and self._batch_done < self._batch_total:
-            pct = 99
-        elapsed = time.monotonic() - self._batch_start
-        if self._batch_done >= 1 and elapsed > 0:
-            remain = (self._batch_total - done) / (self._batch_done / elapsed)
-            if remain > 0:
-                self.status_overall.setText(tr(
-                    "status_overall_eta", pct=pct,
-                    eta=format_duration(int(remain))))
-                return
-        self.status_overall.setText(tr("status_overall", pct=pct))
+    def _switch_page(self, index):
+        self.pages.setCurrentIndex(index)
+        for i, btn in enumerate(self._nav_buttons):
+            btn.setChecked(i == index)
+        if index == 1:
+            self.history_panel.refresh(self.download_history)
 
-    def _show_from_tray(self):
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
+    def _update_sidebar_pro(self):
+        if hasattr(self, "sidebar_pro_btn"):
+            self.sidebar_pro_btn.setVisible(not self.pro)
+            self.sidebar_pro_label.setVisible(self.pro)
 
-    def _quit_from_tray(self):
-        self._really_quit = True
-        self.close()
-
-    def _on_tray_activated(self, reason):
-        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
-            self._show_from_tray()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if hasattr(self, "queue_empty_label") \
-                and self.queue_empty_label.isVisible():
-            self.queue_empty_label.setGeometry(self.queue_list.rect())
+    def _on_settings_panel_changed(self):
+        self.config = self.settings_panel.get_config()
+        save_config(self.config)
+        self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
+        self.pro = _license_is_pro(self.config.get("license_key", ""))
+        self.setWindowTitle("VibeDL - Audio Downloader"
+                            + (" Pro" if self.pro else ""))
+        # 実行中に上限を上げたら空き枠をすぐ埋める
+        if self.active_workers:
+            self.start_queue()
+        self.apply_theme()
+        self.update_settings_display()
+        self.update_clipboard_monitor()
+        self._update_sidebar_pro()
 
     def closeEvent(self, event):
         # ウィンドウ位置・サイズを保存
@@ -1670,30 +1681,20 @@ class SearchDialog(QDialog):
         self.accept()
 
 
-class HistoryDialog(QDialog):
-    def __init__(self, parent, entries):
-        super().__init__(parent)
-        self.frame = parent
-        self.setWindowTitle(tr("history_title"))
-        self.resize(660, 440)
+class HistoryPanel(QWidget):
+    """ダウンロード履歴ページ（旧 HistoryDialog のページ版）。"""
 
+    def __init__(self, frame):
+        super().__init__(frame)
+        self.frame = frame
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
         self.search_ctrl = QLineEdit()
         self.search_ctrl.setPlaceholderText(tr("history_search_ph"))
         self.search_ctrl.textChanged.connect(self._filter_history)
         layout.addWidget(self.search_ctrl)
         self.list_widget = QListWidget()
-        for entry in entries:
-            text = f"{entry.get('title', '')}  ―  {entry.get('date', '')}"
-            if not os.path.exists(entry.get('path', '')):
-                text += tr("missing_file_suffix")
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, entry)
-            self.list_widget.addItem(item)
         layout.addWidget(self.list_widget, 1)
-        if not entries:
-            self.list_widget.addItem(tr("history_empty"))
-
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         play_btn = QPushButton(tr("play2"))
@@ -1702,10 +1703,20 @@ class HistoryDialog(QDialog):
         redl_btn = QPushButton(tr("redownload"))
         redl_btn.clicked.connect(self.on_redownload)
         btn_row.addWidget(redl_btn)
-        close_btn = QPushButton(tr("close"))
-        close_btn.clicked.connect(self.reject)
-        btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+
+    def refresh(self, entries):
+        self.list_widget.clear()
+        for entry in entries:
+            text = f"{entry.get('title', '')}  ―  {entry.get('date', '')}"
+            if not os.path.exists(entry.get('path', '')):
+                text += tr("missing_file_suffix")
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, entry)
+            self.list_widget.addItem(item)
+        if not entries:
+            self.list_widget.addItem(tr("history_empty"))
+        self._filter_history(self.search_ctrl.text())
 
     def _filter_history(self, text):
         needle = (text or "").lower()
@@ -1726,7 +1737,8 @@ class HistoryDialog(QDialog):
         if entry and os.path.exists(entry.get('path', '')):
             os.startfile(entry['path'])
         elif entry:
-            QMessageBox.information(self, tr("info_title"), tr("file_not_found"))
+            QMessageBox.information(self, tr("info_title"),
+                                    tr("file_not_found"))
 
     def on_redownload(self):
         entry = self._selected_entry()
@@ -1737,20 +1749,23 @@ class HistoryDialog(QDialog):
             return
         start_sec, end_sec = time_range
         self.frame._dispatch_add(entry['url'], start_sec, end_sec)
-        self.accept()
+        self.frame._switch_page(0)
 
 
-class SettingsDialog(QDialog):
+class SettingsPanel(QWidget):
+    """設定ページ。変更はデバウンスして changed シグナルで通知する。"""
+
+    changed = Signal()
+
     def __init__(self, parent, config):
         super().__init__(parent)
-        self.setWindowTitle(tr("settings_title"))
-        self.resize(480, 520)
         self.config = dict(config)
         self.config["url_history"] = list(config.get("url_history", []))
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
         tabs = QTabWidget()
 
         # 出力タブ
@@ -1998,17 +2013,23 @@ class SettingsDialog(QDialog):
         self.on_normalize_toggle()
 
         layout.addWidget(tabs)
+        self._wire_live_apply()
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        ok_btn = QPushButton("OK")
-        ok_btn.setObjectName("primary")
-        ok_btn.clicked.connect(self.accept)
-        btn_row.addWidget(ok_btn)
-        cancel_btn = QPushButton(tr("cancel"))
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-        layout.addLayout(btn_row)
+    def _wire_live_apply(self):
+        self._apply_timer = QTimer(self)
+        self._apply_timer.setSingleShot(True)
+        self._apply_timer.setInterval(500)
+        self._apply_timer.timeout.connect(self.changed.emit)
+        for cls, sig in ((QCheckBox, "toggled"),
+                         (QComboBox, "currentIndexChanged"),
+                         (QLineEdit, "textChanged"),
+                         (QSpinBox, "valueChanged"),
+                         (QDoubleSpinBox, "valueChanged")):
+            for w in self.findChildren(cls):
+                getattr(w, sig).connect(self._schedule_apply)
+
+    def _schedule_apply(self, *_):
+        self._apply_timer.start()
 
     def on_normalize_toggle(self):
         self.lufs_spin.setEnabled(self.normalize_cb.isChecked())
@@ -2082,6 +2103,31 @@ class SettingsDialog(QDialog):
         self.config["license_key"] = self.license_ctrl.text().strip()
         self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
+
+
+class SettingsDialog(QDialog):
+    """互換用ラッパー: 設定パネルをダイアログとして開く。"""
+
+    def __init__(self, parent, config):
+        super().__init__(parent)
+        self.setWindowTitle(tr("settings_title"))
+        self.resize(520, 560)
+        layout = QVBoxLayout(self)
+        self.panel = SettingsPanel(self, config)
+        layout.addWidget(self.panel)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.setObjectName("primary")
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+        cancel_btn = QPushButton(tr("cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+    def get_config(self):
+        return self.panel.get_config()
 
 
 def main():
