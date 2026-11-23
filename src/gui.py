@@ -544,8 +544,7 @@ def section_label(text):
 class VibeDLFrame(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeDL - Audio Downloader"
-                            + (" Pro" if self.pro else ""))
+        self.setWindowTitle("VibeDL - Audio Downloader")
         self.setWindowIcon(make_app_icon())
         self.resize(900, 680)
         self.setMinimumSize(780, 580)
@@ -557,6 +556,8 @@ class VibeDLFrame(QMainWindow):
         self.active_workers = []
         self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
         self.pro = _license_is_pro(self.config.get("license_key", ""))
+        if self.pro:
+            self.setWindowTitle("VibeDL - Audio Downloader Pro")
         self.last_dest_path = None
         self.download_history = load_download_history()
         self._bg_threads = set()
