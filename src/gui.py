@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 from downloader import (
     download_audio, search_youtube, get_playlist_entries, get_video_info,
 )
+from license_check import is_pro as _license_is_pro, parse_license_key
 from audio_processor import (
     normalize_audio, embed_metadata, trim_and_fade,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
@@ -152,6 +153,11 @@ TEXTS = {
     "tab_general": {"ja": "一般", "en": "General"},
     "language_label": {"ja": "言語", "en": "Language"},
     "max_parallel_label": {"ja": "同時ダウンロード数（1〜5）", "en": "Parallel downloads (1-5)"},
+    "parallel_pro_note": {"ja": "※3以上は Pro ライセンスが必要です（未登録の場合は2まで有効）", "en": "3 or more requires a Pro license (capped at 2 without one)."},
+    "license_label": {"ja": "Pro ライセンスキー", "en": "Pro license key"},
+    "license_check": {"ja": "確認", "en": "Check"},
+    "license_valid": {"ja": "✓ Pro 有効（{name}）", "en": "✓ Pro active ({name})"},
+    "license_invalid": {"ja": "未登録、または無効なキーです", "en": "Not registered, or the key is invalid."},
     "language_note": {"ja": "※言語の変更は再起動後に反映されます", "en": "Language changes apply after restarting the app."},
     "folder_dialog": {"ja": "フォルダを選択", "en": "Select Folder"},
     "cookies_dialog": {"ja": "cookies.txt を選択", "en": "Select cookies.txt"},
@@ -538,7 +544,8 @@ def section_label(text):
 class VibeDLFrame(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VibeDL - Audio Downloader")
+        self.setWindowTitle("VibeDL - Audio Downloader"
+                            + (" Pro" if self.pro else ""))
         self.setWindowIcon(make_app_icon())
         self.resize(900, 680)
         self.setMinimumSize(780, 580)
@@ -549,6 +556,7 @@ class VibeDLFrame(QMainWindow):
         self.queue = []
         self.active_workers = []
         self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
+        self.pro = _license_is_pro(self.config.get("license_key", ""))
         self.last_dest_path = None
         self.download_history = load_download_history()
         self._bg_threads = set()
@@ -963,7 +971,9 @@ class VibeDLFrame(QMainWindow):
         if not self.active_workers and any(item.status == "waiting" for item in self.queue):
             self.progress.setValue(0)
             self.status_label.setText("")
-        while len(self.active_workers) < self.max_workers:
+        # 同時数の実効上限: Pro でなければ 2 まで
+        limit = self.max_workers if self.pro else min(self.max_workers, 2)
+        while len(self.active_workers) < limit:
             waiting = [i for i in self.queue if i.status == "waiting"]
             if not waiting:
                 break
@@ -1110,6 +1120,9 @@ class VibeDLFrame(QMainWindow):
             self.config = dlg.get_config()
             save_config(self.config)
             self.max_workers = max(1, int(self.config.get("max_parallel", 2)))
+            self.pro = _license_is_pro(self.config.get("license_key", ""))
+            self.setWindowTitle("VibeDL - Audio Downloader"
+                                + (" Pro" if self.pro else ""))
             # 実行中に上限を上げたら空き枠をすぐ埋める（停止中のキューは動かさない）
             if self.active_workers:
                 self.start_queue()
@@ -1421,6 +1434,21 @@ class SettingsDialog(QDialog):
         parallel_row.addWidget(self.parallel_spin)
         parallel_row.addStretch()
         general_layout.addLayout(parallel_row)
+        parallel_note = QLabel(tr("parallel_pro_note"))
+        parallel_note.setObjectName("muted")
+        general_layout.addWidget(parallel_note)
+        license_row = QHBoxLayout()
+        license_row.addWidget(QLabel(tr("license_label")))
+        self.license_ctrl = QLineEdit(self.config.get("license_key", ""))
+        license_row.addWidget(self.license_ctrl, 1)
+        license_check_btn = QPushButton(tr("license_check"))
+        license_check_btn.clicked.connect(self._on_license_check)
+        license_row.addWidget(license_check_btn)
+        general_layout.addLayout(license_row)
+        self.license_status = QLabel("")
+        self.license_status.setObjectName("muted")
+        general_layout.addWidget(self.license_status)
+        self._update_license_status()
         general_layout.addStretch()
         tabs.addTab(general_tab, tr("tab_general"))
 
@@ -1456,6 +1484,17 @@ class SettingsDialog(QDialog):
         if path:
             self.cookies_file_ctrl.setText(path)
 
+    def _update_license_status(self):
+        payload = parse_license_key(self.license_ctrl.text().strip())
+        if payload:
+            self.license_status.setText(
+                tr("license_valid", name=payload.get("name", "")))
+        else:
+            self.license_status.setText(tr("license_invalid"))
+
+    def _on_license_check(self):
+        self._update_license_status()
+
     def get_config(self):
         self.config["output_format"] = self.fmt_combo.currentText()
         self.config["bitrate"] = self.br_combo.currentText()
@@ -1474,6 +1513,7 @@ class SettingsDialog(QDialog):
         self.config["cookies_file"] = self.cookies_file_ctrl.text().strip()
         self.config["language"] = ["ja", "en"][self.language_combo.currentIndex()]
         self.config["max_parallel"] = self.parallel_spin.value()
+        self.config["license_key"] = self.license_ctrl.text().strip()
         self.config["name_template"] = self.name_template_ctrl.text().strip() or "{title}"
         return self.config
 

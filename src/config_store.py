@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "fade_seconds": 1.0,
     "language": "ja",
     "max_parallel": 2,
+    "license_key": "",
 }
 
 # config key -> (registry value name, kind)
@@ -46,6 +47,7 @@ _KEY_MAP = {
     "fade_seconds": ("FadeSeconds", "float"),
     "language": ("Language", "str"),
     "max_parallel": ("MaxParallel", "int"),
+    "license_key": ("LicenseKey", "str"),
 }
 
 
