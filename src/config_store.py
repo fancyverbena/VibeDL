@@ -32,6 +32,12 @@ DEFAULT_CONFIG = {
     "after_finish": "",
     "auto_retry": 0,
     "rate_limit_mbps": 0.0,
+    "theme_mode": "",
+    "minimize_to_tray": False,
+    "window_x": -1,
+    "window_y": -1,
+    "window_w": 0,
+    "window_h": 0,
 }
 
 # config key -> (registry value name, kind)
@@ -62,6 +68,12 @@ _KEY_MAP = {
     "after_finish": ("AfterFinish", "str"),
     "auto_retry": ("AutoRetry", "int"),
     "rate_limit_mbps": ("RateLimitMbps", "float"),
+    "theme_mode": ("ThemeMode", "str"),
+    "minimize_to_tray": ("MinimizeToTray", "bool"),
+    "window_x": ("WindowX", "int"),
+    "window_y": ("WindowY", "int"),
+    "window_w": ("WindowW", "int"),
+    "window_h": ("WindowH", "int"),
 }
 
 
