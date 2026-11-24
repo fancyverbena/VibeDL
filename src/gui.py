@@ -4,18 +4,20 @@ wxPython 版から移行した GUI。見た目は QSS（Qt Style Sheets）で
 一元管理し、カード型レイアウト + アクセントカラーで統一している。
 ダウンロード・音声処理・設定保存は従来モジュールをそのまま使う。
 """
+import csv
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 import urllib.request
 import winsound
 from datetime import datetime
 
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut,
 )
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit,
     QProgressBar, QProgressDialog, QPushButton, QSpinBox, QTabWidget,
+    QTimeEdit,
     QVBoxLayout, QWidget, QSystemTrayIcon, QStackedWidget,
 )
 
@@ -179,6 +182,15 @@ TEXTS = {
     "update_available_msg": {"ja": "新しいバージョン {tag} が公開されています（現在 {current}）。\nダウンロードページを開きますか？", "en": "A new version {tag} is available (current: {current}).\nOpen the download page?"},
     "update_latest_msg": {"ja": "すでに最新バージョンです（{current}）", "en": "You are on the latest version ({current})"},
     "update_failed_msg": {"ja": "アップデートの確認に失敗しました", "en": "Failed to check for updates"},
+    "schedule_cb": {"ja": "予約ダウンロード（指定時刻に自動で開始）", "en": "Scheduled download (auto-start at the set time)"},
+    "schedule_time_label": {"ja": "開始時刻", "en": "Start time"},
+    "log_scheduled_start": {"ja": "予約時刻になったためダウンロードを開始します", "en": "Scheduled time reached; starting downloads"},
+    "webhook_label": {"ja": "Discord Webhook URL（完了通知）", "en": "Discord Webhook URL (completion notice)"},
+    "webhook_msg": {"ja": "✅ VibeDL: ダウンロードが完了しました（{name}）", "en": "✅ VibeDL: Download complete ({name})"},
+    "webhook_msg_multi": {"ja": "✅ VibeDL: {n}件のダウンロードが完了しました", "en": "✅ VibeDL: {n} downloads complete"},
+    "export_csv_btn": {"ja": "CSVエクスポート", "en": "Export CSV"},
+    "csv_filter": {"ja": "CSVファイル (*.csv)", "en": "CSV files (*.csv)"},
+    "export_done": {"ja": "履歴をCSVに書き出しました", "en": "History exported to CSV"},
     "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
     "status_overall": {"ja": "全体 {pct}%", "en": "Overall {pct}%"},
     "status_overall_eta": {"ja": "全体 {pct}% ・ 残り約 {eta}", "en": "Overall {pct}% · about {eta} left"},
@@ -794,6 +806,11 @@ class VibeDLFrame(QMainWindow):
         QTimer.singleShot(100, self.check_ffmpeg_on_startup)
         if self.config.get("check_updates", True):
             QTimer.singleShot(1500, lambda: self.check_for_updates(False))
+        self._schedule_fired_date = None
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setInterval(20000)
+        self._schedule_timer.timeout.connect(self._check_schedule)
+        self._schedule_timer.start()
 
     # ---------- UI構築 ----------
     def _init_ui(self):
@@ -1069,6 +1086,53 @@ class VibeDLFrame(QMainWindow):
             if text != self.url_ctrl.currentText().strip():
                 self.url_ctrl.setCurrentText(text)
                 self.log(tr("clipboard_pasted"))
+
+    # ---------- 予約ダウンロード・Webhook通知 ----------
+    def _check_schedule(self):
+        if not self.config.get("schedule_enabled", False):
+            return
+        if self.active_workers:
+            return
+        if not any(i.status == "waiting" for i in self.queue):
+            return
+        now = datetime.now()
+        if now.strftime("%H:%M") != \
+                str(self.config.get("schedule_time", "")):
+            return
+        today = now.strftime("%Y-%m-%d")
+        if self._schedule_fired_date == today:
+            return
+        self._schedule_fired_date = today
+        self.log(tr("log_scheduled_start"))
+        self.start_queue()
+
+    def _send_webhook(self, text):
+        url = str(self.config.get("webhook_url", "")).strip()
+        if not url:
+            return
+
+        def _post():
+            try:
+                data = json.dumps({"content": text}).encode("utf-8")
+                req = urllib.request.Request(
+                    url, data=data,
+                    headers={"Content-Type": "application/json",
+                             "User-Agent": f"VibeDL/{APP_VERSION}"})
+                urllib.request.urlopen(req, timeout=8).read()
+            except Exception:
+                pass
+
+        threading.Thread(target=_post, daemon=True).start()
+
+    def _notify_batch_webhook(self):
+        if not self._batch_success:
+            return
+        if self._batch_done > 1:
+            self._send_webhook(tr("webhook_msg_multi", n=self._batch_done))
+        elif self.last_dest_path:
+            self._send_webhook(tr(
+                "webhook_msg",
+                name=os.path.basename(self.last_dest_path)))
 
     # ---------- アップデート確認 ----------
     def check_for_updates(self, manual=False):
@@ -1528,6 +1592,7 @@ class VibeDLFrame(QMainWindow):
                     tr("status_done_with_failed", n=failed_n))
             else:
                 self.status_label.setText(tr("status_done"))
+                self._notify_batch_webhook()
                 self._run_after_finish_action()
 
     def on_retry_failed(self):
@@ -1832,6 +1897,9 @@ class HistoryPanel(QWidget):
         layout.addWidget(self.list_widget, 1)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
+        export_btn = QPushButton(tr("export_csv_btn"))
+        export_btn.clicked.connect(self.on_export_csv)
+        btn_row.addWidget(export_btn)
         play_btn = QPushButton(tr("play2"))
         play_btn.clicked.connect(self.on_play)
         btn_row.addWidget(play_btn)
@@ -1866,6 +1934,26 @@ class HistoryPanel(QWidget):
     def _selected_entry(self):
         item = self.list_widget.currentItem()
         return item.data(Qt.UserRole) if item else None
+
+    def on_export_csv(self):
+        entries = self.frame.download_history
+        if not entries:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("export_csv_btn"), "vibedl_history.csv",
+            tr("csv_filter"))
+        if not path:
+            return
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(["date", "title", "url", "path"])
+                for e in entries:
+                    writer.writerow([e.get("date", ""), e.get("title", ""),
+                                     e.get("url", ""), e.get("path", "")])
+        except OSError:
+            return
+        QMessageBox.information(self, "VibeDL", tr("export_done"))
 
     def on_play(self):
         entry = self._selected_entry()
@@ -2025,6 +2113,28 @@ class SettingsPanel(QWidget):
         update_row.addWidget(self.update_btn)
         update_row.addStretch()
         general_layout.addLayout(update_row)
+        schedule_row = QHBoxLayout()
+        self.schedule_cb = QCheckBox(tr("schedule_cb"))
+        self.schedule_cb.setChecked(
+            self.config.get("schedule_enabled", False))
+        schedule_row.addWidget(self.schedule_cb)
+        schedule_row.addWidget(QLabel(tr("schedule_time_label")))
+        self.schedule_time = QTimeEdit()
+        self.schedule_time.setDisplayFormat("HH:mm")
+        _t = QTime.fromString(
+            str(self.config.get("schedule_time", "23:00")), "HH:mm")
+        self.schedule_time.setTime(_t if _t.isValid() else QTime(23, 0))
+        self.schedule_time.timeChanged.connect(self._schedule_apply)
+        schedule_row.addWidget(self.schedule_time)
+        schedule_row.addStretch()
+        general_layout.addLayout(schedule_row)
+        webhook_row = QHBoxLayout()
+        webhook_row.addWidget(QLabel(tr("webhook_label")))
+        self.webhook_ctrl = QLineEdit(self.config.get("webhook_url", ""))
+        self.webhook_ctrl.setPlaceholderText(
+            "https://discord.com/api/webhooks/...")
+        webhook_row.addWidget(self.webhook_ctrl, 1)
+        general_layout.addLayout(webhook_row)
         self.clipboard_cb = QCheckBox(tr("clipboard_cb"))
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
@@ -2234,6 +2344,10 @@ class SettingsPanel(QWidget):
         self.config["dark_mode"] = self.config["theme_mode"] == "dark"
         self.config["minimize_to_tray"] = self.tray_cb.isChecked()
         self.config["check_updates"] = self.update_cb.isChecked()
+        self.config["schedule_enabled"] = self.schedule_cb.isChecked()
+        self.config["schedule_time"] = \
+            self.schedule_time.time().toString("HH:mm")
+        self.config["webhook_url"] = self.webhook_ctrl.text().strip()
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
