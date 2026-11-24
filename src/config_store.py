@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
     "schedule_enabled": False,
     "schedule_time": "23:00",
     "webhook_url": "",
+    "prevent_sleep": False,
+    "mirror_folder": "",
     "window_x": -1,
     "window_y": -1,
     "window_w": 0,
@@ -78,6 +80,8 @@ _KEY_MAP = {
     "schedule_enabled": ("ScheduleEnabled", "bool"),
     "schedule_time": ("ScheduleTime", "str"),
     "webhook_url": ("WebhookUrl", "str"),
+    "prevent_sleep": ("PreventSleep", "bool"),
+    "mirror_folder": ("MirrorFolder", "str"),
     "window_x": ("WindowX", "int"),
     "window_y": ("WindowY", "int"),
     "window_w": ("WindowW", "int"),
@@ -196,6 +200,31 @@ def save_watch_state(state):
                             winreg.KEY_WRITE) as key:
         winreg.SetValueEx(key, "WatchState", 0, winreg.REG_SZ,
                           json.dumps(state, ensure_ascii=False))
+
+
+def load_presets():
+    """設定プリセット {名前: {config部分集合}} を読み込む。"""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+    except FileNotFoundError:
+        return {}
+    with key:
+        try:
+            raw = winreg.QueryValueEx(key, "Presets")[0]
+            data = json.loads(raw)
+        except (FileNotFoundError, TypeError, ValueError):
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def save_presets(presets):
+    """設定プリセットを保存する。"""
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, REG_PATH, 0,
+                            winreg.KEY_WRITE) as key:
+        winreg.SetValueEx(key, "Presets", 0, winreg.REG_SZ,
+                          json.dumps(presets, ensure_ascii=False))
 
 
 def load_queue_items():
