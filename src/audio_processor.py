@@ -446,3 +446,107 @@ def embed_metadata(file_path, title, artist, thumb_url, lyrics=None):
             audio['metadata_block_picture'] = [
                 base64.b64encode(pic.write()).decode('ascii')]
         audio.save()
+
+
+def convert_audio(input_path, output_path, ffmpeg_info=None, bitrate=None):
+    """ローカルファイルを別形式へ変換する（再エンコード）。"""
+    if ffmpeg_info is None:
+        ffmpeg_info = get_ffmpeg_info()
+    ext = os.path.splitext(output_path)[1]
+    cmd = [ffmpeg_info['path'], '-y', '-i', input_path,
+           *_encoder_args(ext, bitrate), output_path]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        return output_path
+    except subprocess.CalledProcessError:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        return None
+
+
+def update_tags(file_path, title=None, artist=None, album=None):
+    """既存ファイルのタイトル/アーティスト/アルバムだけを書き換える。"""
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext in ('.mp3', '.wav'):
+            if ext == '.mp3':
+                try:
+                    audio = MP3(file_path, ID3=ID3)
+                except ID3NoHeaderError:
+                    audio = MP3(file_path)
+                    audio.add_tags()
+            else:
+                audio = WAVE(file_path)
+            if audio.tags is None:
+                audio.add_tags()
+            if title is not None:
+                audio.tags.add(TIT2(encoding=3, text=title))
+            if artist is not None:
+                audio.tags.add(TPE1(encoding=3, text=artist))
+            if album is not None:
+                audio.tags.add(TALB(encoding=3, text=album))
+            audio.save()
+        elif ext == '.m4a':
+            audio = MP4(file_path)
+            if title is not None:
+                audio['\xa9nam'] = title
+            if artist is not None:
+                audio['\xa9ART'] = artist
+            if album is not None:
+                audio['\xa9alb'] = album
+            audio.save()
+        elif ext in ('.flac', '.opus'):
+            if ext == '.flac':
+                audio = FLAC(file_path)
+            else:
+                from mutagen.oggopus import OggOpus
+                audio = OggOpus(file_path)
+            if title is not None:
+                audio['title'] = title
+            if artist is not None:
+                audio['artist'] = artist
+            if album is not None:
+                audio['album'] = album
+            audio.save()
+        else:
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def read_tags(file_path):
+    """タイトル/アーティスト/アルバムを読み出す（無い項目は ''）。"""
+    result = {'title': '', 'artist': '', 'album': ''}
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext in ('.mp3', '.wav'):
+            audio = MP3(file_path) if ext == '.mp3' else WAVE(file_path)
+            tags = getattr(audio, 'tags', None)
+            if tags:
+                for key, frame_id in (('title', 'TIT2'),
+                                      ('artist', 'TPE1'),
+                                      ('album', 'TALB')):
+                    if frame_id in tags:
+                        result[key] = str(tags[frame_id])
+        elif ext == '.m4a':
+            audio = MP4(file_path)
+            for key, atom in (('title', '\xa9nam'), ('artist', '\xa9ART'),
+                              ('album', '\xa9alb')):
+                values = audio.get(atom)
+                if values:
+                    result[key] = str(values[0])
+        elif ext in ('.flac', '.opus'):
+            if ext == '.flac':
+                audio = FLAC(file_path)
+            else:
+                from mutagen.oggopus import OggOpus
+                audio = OggOpus(file_path)
+            for key in result:
+                values = audio.get(key)
+                if values:
+                    result[key] = str(values[0])
+    except Exception:
+        pass
+    return result
