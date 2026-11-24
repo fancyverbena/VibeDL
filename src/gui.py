@@ -249,6 +249,18 @@ TEXTS = {
     "export_queue_btn": {"ja": "キュー書き出し", "en": "Export queue"},
     "export_queue_done": {"ja": "キューのURLを書き出しました（{n}件）", "en": "Exported {n} queue URL(s)"},
     "downloaded_suffix": {"ja": "DL済み", "en": "Downloaded"},
+    "pause_btn": {"ja": "一時停止", "en": "Pause"},
+    "resume_btn": {"ja": "再開", "en": "Resume"},
+    "status_paused": {"ja": "一時停止中（実行中の分が終わると止まります）", "en": "Paused (stops after current downloads finish)"},
+    "playlist_cb": {"ja": "完了時にm3uプレイリストを作成", "en": "Create an .m3u playlist when a batch finishes"},
+    "log_playlist_created": {"ja": "プレイリストを作成しました: {name}", "en": "Playlist created: {name}"},
+    "ctx_priority": {"ja": "優先してダウンロード", "en": "Download first"},
+    "history_bulk_redownload": {"ja": "選択を再DL", "en": "Redownload selected"},
+    "history_bulk_delete": {"ja": "選択を削除", "en": "Delete selected"},
+    "history_delete_confirm": {"ja": "選択した履歴を削除しますか？", "en": "Delete the selected history entries?"},
+    "confirm_title": {"ja": "確認", "en": "Confirm"},
+    "rename_rules_label": {"ja": "スマートリネーム（Pro）: ファイル名への正規表現ルール（1行に1つ。「パターン => 置換」、パターンのみで削除）", "en": "Smart rename (Pro): regex rules for file names, one per line ('pattern => replacement', or pattern only to remove)"},
+    "rename_rules_ph": {"ja": "例: 【[^】]*】 => ", "en": "Example: \\[[^\\]]*\\] => "},
     "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
     "status_overall": {"ja": "全体 {pct}%", "en": "Overall {pct}%"},
     "status_overall_eta": {"ja": "全体 {pct}% ・ 残り約 {eta}", "en": "Overall {pct}% · about {eta} left"},
@@ -537,6 +549,13 @@ class DownloadWorker(QThread):
                     except OSError:
                         pass
 
+            if pro and self.config.get("rename_rules"):
+                new_dest = renamed_path(data['dest_path'],
+                                        self.config["rename_rules"])
+                if new_dest != data['dest_path']:
+                    os.rename(data['dest_path'], new_dest)
+                    data['dest_path'] = new_dest
+
             self.log.emit(tr("log_complete", path=data['dest_path']))
             self.item_finished.emit(self.item, data['dest_path'])
         except DownloadCancelled:
@@ -725,6 +744,38 @@ def classify_error(message):
     if "timed out" in low or "timeout" in low or "connection" in low:
         return "err_advice_network"
     return "err_advice_generic"
+
+
+def apply_rename_rules(name, rules_text):
+    """ファイル名（拡張子なし）に正規表現ルールを上から順に適用する。"""
+    result = name
+    for line in (rules_text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=>" in line:
+            pattern, repl = line.split("=>", 1)
+            pattern, repl = pattern.strip(), repl.strip()
+        else:
+            pattern, repl = line, ""
+        if not pattern:
+            continue
+        try:
+            result = re.sub(pattern, repl, result)
+        except re.error:
+            continue
+    result = re.sub(r'[\\/:*?"<>|]', "", result)
+    return re.sub(r"\s+", " ", result).strip()
+
+
+def renamed_path(path, rules_text):
+    """ルール適用後の保存パスを返す（変わらなければ元のパス）。"""
+    folder = os.path.dirname(path)
+    base, ext = os.path.splitext(os.path.basename(path))
+    new_base = apply_rename_rules(base, rules_text)
+    if not new_base or new_base == base:
+        return path
+    return get_unique_path(os.path.join(folder, new_base + ext))
 
 
 def find_new_entries(entries, seen_urls):
@@ -974,6 +1025,8 @@ class VibeDLFrame(QMainWindow):
             self.setWindowTitle("VibeDL - Audio Downloader Pro")
         self.last_dest_path = None
         self._batch_success = False
+        self._batch_files = []
+        self._queue_paused = False
         self._batch_total = 0
         self._batch_done = 0
         self._batch_start = None
@@ -1150,6 +1203,9 @@ class VibeDLFrame(QMainWindow):
         self.cancel_btn.clicked.connect(self.on_cancel_downloads)
         self.cancel_btn.setEnabled(False)
         btn_row.addWidget(self.cancel_btn)
+        self.pause_btn = QPushButton(tr("pause_btn"))
+        self.pause_btn.clicked.connect(self.on_toggle_pause)
+        btn_row.addWidget(self.pause_btn)
         btn_row.addStretch()
         card_layout.addLayout(btn_row)
 
@@ -1411,6 +1467,26 @@ class VibeDLFrame(QMainWindow):
                 pass
 
         threading.Thread(target=_post, daemon=True).start()
+
+    def _write_batch_playlist(self):
+        if not self.config.get("make_playlist", False):
+            return
+        files = [p for p in self._batch_files if os.path.exists(p)]
+        if not files:
+            return
+        folder = self.config.get("output_folder", "")
+        name = f"VibeDL_{datetime.now().strftime('%Y%m%d_%H%M%S')}.m3u8"
+        path = os.path.join(folder, name)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("#EXTM3U\n")
+                for dest in files:
+                    title = os.path.splitext(os.path.basename(dest))[0]
+                    f.write(f"#EXTINF:-1,{title}\n")
+                    f.write(os.path.relpath(dest, folder) + "\n")
+        except OSError:
+            return
+        self.log(tr("log_playlist_created", name=name))
 
     def _notify_batch_webhook(self):
         if not self._batch_success:
@@ -1745,6 +1821,9 @@ class VibeDLFrame(QMainWindow):
         if item.status == "failed":
             act_retry = menu.addAction(tr("ctx_retry"))
             act_error = menu.addAction(tr("ctx_error_detail"))
+        act_priority = None
+        if item.status == "waiting":
+            act_priority = menu.addAction(tr("ctx_priority"))
         act_remove = None
         if item.status in ("waiting", "failed"):
             act_remove = menu.addAction(tr("ctx_remove"))
@@ -1760,6 +1839,15 @@ class VibeDLFrame(QMainWindow):
             self.toggle_preview(item)
         elif act_error is not None and action == act_error:
             self._show_error_detail(item)
+        elif act_priority is not None and action == act_priority:
+            self.queue.remove(item)
+            first_waiting = next(
+                (idx for idx, i in enumerate(self.queue)
+                 if i.status == "waiting"), len(self.queue))
+            self.queue.insert(first_waiting, item)
+            self._save_queue()
+            self.update_queue_display()
+            self.start_queue()
         elif action == act_copy:
             QApplication.clipboard().setText(item.url)
         elif action == act_open:
@@ -1904,7 +1992,18 @@ class VibeDLFrame(QMainWindow):
         except Exception:
             pass
 
+    def on_toggle_pause(self):
+        self._queue_paused = not self._queue_paused
+        self.pause_btn.setText(
+            tr("resume_btn") if self._queue_paused else tr("pause_btn"))
+        if self._queue_paused:
+            self.status_label.setText(tr("status_paused"))
+        else:
+            self.start_queue()
+
     def start_queue(self):
+        if self._queue_paused:
+            return
         # 実行中のワーカーがある場合は進捗表示をリセットしない（設定変更で
         # 空き枠を埋める場合など、途中での呼び出しに備える）
         if not self.active_workers and any(item.status == "waiting" for item in self.queue):
@@ -1914,6 +2013,8 @@ class VibeDLFrame(QMainWindow):
                 1 for i in self.queue
                 if i.status in ("waiting", "downloading"))
             self._batch_done = 0
+            self._batch_success = False
+            self._batch_files = []
             self._batch_start = time.monotonic()
             self._update_overall_status()
         # 同時数の実効上限: Pro でなければ 2 まで
@@ -1968,6 +2069,7 @@ class VibeDLFrame(QMainWindow):
                 self.open_folder_btn.setEnabled(True)
                 self.play_btn.setEnabled(True)
                 self._record_download_history(item, dest_path)
+                self._batch_files.append(dest_path)
                 self._mirror_file(dest_path)
                 self.notify_user(tr("notify_complete"), os.path.basename(dest_path))
                 self.queue.remove(item)
@@ -2006,6 +2108,7 @@ class VibeDLFrame(QMainWindow):
                     tr("status_done_with_failed", n=failed_n))
             else:
                 self.status_label.setText(tr("status_done"))
+                self._write_batch_playlist()
                 self._notify_batch_webhook()
                 self._run_after_finish_action()
 
@@ -2348,9 +2451,17 @@ class HistoryPanel(QWidget):
         self.search_ctrl.textChanged.connect(self._filter_history)
         layout.addWidget(self.search_ctrl)
         self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(
+            QAbstractItemView.ExtendedSelection)
         layout.addWidget(self.list_widget, 1)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
+        bulk_redl_btn = QPushButton(tr("history_bulk_redownload"))
+        bulk_redl_btn.clicked.connect(self.on_bulk_redownload)
+        btn_row.addWidget(bulk_redl_btn)
+        bulk_del_btn = QPushButton(tr("history_bulk_delete"))
+        bulk_del_btn.clicked.connect(self.on_bulk_delete)
+        btn_row.addWidget(bulk_del_btn)
         export_btn = QPushButton(tr("export_csv_btn"))
         export_btn.clicked.connect(self.on_export_csv)
         btn_row.addWidget(export_btn)
@@ -2475,6 +2586,39 @@ class HistoryPanel(QWidget):
         start_sec, end_sec = time_range
         self.frame._dispatch_add(entry['url'], start_sec, end_sec)
         self.frame._switch_page(0)
+
+    def _selected_entries(self):
+        return [item.data(Qt.UserRole)
+                for item in self.list_widget.selectedItems()]
+
+    def on_bulk_redownload(self):
+        entries = [e for e in self._selected_entries() if e]
+        if not entries:
+            return
+        time_range = self.frame._current_time_range()
+        if time_range is None:
+            return
+        start_sec, end_sec = time_range
+        for entry in entries:
+            self.frame._dispatch_add(entry['url'], start_sec, end_sec)
+        self.frame._switch_page(0)
+
+    def on_bulk_delete(self):
+        entries = [e for e in self._selected_entries() if e]
+        if not entries:
+            return
+        answer = QMessageBox.question(
+            self, tr("confirm_title"), tr("history_delete_confirm"))
+        if answer != QMessageBox.Yes:
+            return
+        for entry in entries:
+            if entry in self.frame.download_history:
+                self.frame.download_history.remove(entry)
+        try:
+            save_download_history(self.frame.download_history)
+        except OSError:
+            pass
+        self.refresh()
 
 
 class LocalConvertDialog(QDialog):
@@ -2708,6 +2852,9 @@ class SettingsPanel(QWidget):
         self.prevent_sleep_cb.setChecked(
             self.config.get("prevent_sleep", False))
         general_layout.addWidget(self.prevent_sleep_cb)
+        self.playlist_cb = QCheckBox(tr("playlist_cb"))
+        self.playlist_cb.setChecked(self.config.get("make_playlist", False))
+        general_layout.addWidget(self.playlist_cb)
         self.clipboard_cb = QCheckBox(tr("clipboard_cb"))
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
@@ -2859,6 +3006,16 @@ class SettingsPanel(QWidget):
         tp_row.addWidget(self.tp_spin)
         tp_row.addStretch()
         pro_layout.addLayout(tp_row)
+        rename_label = QLabel(tr("rename_rules_label"))
+        rename_label.setObjectName("muted")
+        rename_label.setWordWrap(True)
+        pro_layout.addWidget(rename_label)
+        self.rename_rules_ctrl = QPlainTextEdit(
+            self.config.get("rename_rules", ""))
+        self.rename_rules_ctrl.setPlaceholderText(tr("rename_rules_ph"))
+        self.rename_rules_ctrl.setMaximumHeight(70)
+        self.rename_rules_ctrl.textChanged.connect(self._schedule_apply)
+        pro_layout.addWidget(self.rename_rules_ctrl)
         pro_note = QLabel(tr("pro_features_note"))
         pro_note.setObjectName("muted")
         pro_note.setWordWrap(True)
@@ -3060,6 +3217,8 @@ class SettingsPanel(QWidget):
             self.schedule_time.time().toString("HH:mm")
         self.config["webhook_url"] = self.webhook_ctrl.text().strip()
         self.config["prevent_sleep"] = self.prevent_sleep_cb.isChecked()
+        self.config["make_playlist"] = self.playlist_cb.isChecked()
+        self.config["rename_rules"] = self.rename_rules_ctrl.toPlainText()
         self.config["mirror_folder"] = self.mirror_ctrl.text().strip()
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
