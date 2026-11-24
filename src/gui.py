@@ -495,8 +495,8 @@ class DownloadWorker(QThread):
             downloaded = d.get('downloaded_bytes', 0)
             percent = int(downloaded / total * 100) if total else 0
             self.progress.emit(percent,
-                               (d.get('_speed_str') or '').strip(),
-                               (d.get('_eta_str') or '').strip())
+                               strip_ansi(d.get('_speed_str')).strip(),
+                               strip_ansi(d.get('_eta_str')).strip())
         elif d.get('status') == 'finished':
             self.progress.emit(100, "", "")
 
@@ -781,9 +781,17 @@ def renamed_path(path, rules_text):
     return get_unique_path(os.path.join(folder, new_base + ext))
 
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def strip_ansi(text):
+    """ANSIエスケープシーケンス（色付け等）を取り除く。"""
+    return ANSI_RE.sub("", text or "")
+
+
 def parse_speed_bytes(text):
     """yt-dlp の速度文字列（例: 1.23MiB/s）を bytes/sec に変換する。"""
-    match = re.match(r"\s*([\d.]+)\s*([KMGT]?i?B)/s", text or "")
+    match = re.match(r"\s*([\d.]+)\s*([KMGT]?i?B)/s", strip_ansi(text))
     if not match:
         return None
     value = float(match.group(1))
