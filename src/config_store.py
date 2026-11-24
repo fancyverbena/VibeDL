@@ -166,6 +166,38 @@ def save_download_history(entries):
                           json.dumps(list(entries)[:50], ensure_ascii=False))
 
 
+def load_watch_state():
+    """新着監視の状態 {"urls": [...], "seen": {url: [動画URL, ...]}} を読み込む。"""
+    default = {"urls": [], "seen": {}}
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH)
+    except FileNotFoundError:
+        return default
+    with key:
+        try:
+            raw = winreg.QueryValueEx(key, "WatchState")[0]
+            data = json.loads(raw)
+        except (FileNotFoundError, TypeError, ValueError):
+            return default
+    if not isinstance(data, dict):
+        return default
+    urls = data.get("urls")
+    seen = data.get("seen")
+    return {
+        "urls": [u for u in urls if isinstance(u, str)][:20]
+        if isinstance(urls, list) else [],
+        "seen": seen if isinstance(seen, dict) else {},
+    }
+
+
+def save_watch_state(state):
+    """新着監視の状態を保存する。"""
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, REG_PATH, 0,
+                            winreg.KEY_WRITE) as key:
+        winreg.SetValueEx(key, "WatchState", 0, winreg.REG_SZ,
+                          json.dumps(state, ensure_ascii=False))
+
+
 def load_queue_items():
     """保存されたキュー（未完了アイテム）を読み込む。最大200件。"""
     try:

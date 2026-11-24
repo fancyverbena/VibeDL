@@ -47,7 +47,7 @@ from audio_processor import (
 )
 from config_store import (
     get_config, save_config, load_download_history, save_download_history,
-    load_queue_items, save_queue_items,
+    load_queue_items, save_queue_items, load_watch_state, save_watch_state,
 )
 
 CURRENT_LANG = "ja"
@@ -191,6 +191,12 @@ TEXTS = {
     "export_csv_btn": {"ja": "CSVエクスポート", "en": "Export CSV"},
     "csv_filter": {"ja": "CSVファイル (*.csv)", "en": "CSV files (*.csv)"},
     "export_done": {"ja": "履歴をCSVに書き出しました", "en": "History exported to CSV"},
+    "watch_label": {"ja": "新着監視（Pro）: チャンネルやプレイリストのURLを登録すると、新着動画を起動時と30分ごとに確認し、自動でキューに追加します", "en": "Watch for new videos (Pro): register channel/playlist URLs; new uploads are checked on startup and every 30 minutes and added to the queue automatically"},
+    "watch_ph": {"ja": "チャンネルまたはプレイリストのURL", "en": "Channel or playlist URL"},
+    "watch_add": {"ja": "追加", "en": "Add"},
+    "watch_remove": {"ja": "選択を削除", "en": "Remove selected"},
+    "watch_added_log": {"ja": "新着監視: {n}件の新着をキューに追加しました", "en": "Watch: added {n} new video(s) to the queue"},
+    "watch_notify_title": {"ja": "新着動画", "en": "New videos"},
     "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
     "status_overall": {"ja": "全体 {pct}%", "en": "Overall {pct}%"},
     "status_overall_eta": {"ja": "全体 {pct}% ・ 残り約 {eta}", "en": "Overall {pct}% · about {eta} left"},
@@ -205,8 +211,8 @@ TEXTS = {
     "tab_pro": {"ja": "Pro", "en": "Pro"},
     "pro_intro": {"ja": "Pro版の機能はこのタブにまとめています。ライセンスキーを入力すると解放されます。",
                   "en": "Pro features are collected on this tab. Enter a license key to unlock them."},
-    "pro_features_note": {"ja": "並列ダウンロード 3〜10 本（一般タブの「並列ダウンロード数」）と、出力ファイル名テンプレートでのフォルダ分け（出力タブ）も Pro 機能です。",
-                          "en": "Parallel downloads 3-10 (General tab) and subfolders via the output filename template (Output tab) are also Pro features."},
+    "pro_features_note": {"ja": "並列ダウンロード 3〜10 本（一般タブの「並列ダウンロード数」）と、出力ファイル名テンプレートでのフォルダ分け（出力タブ）、新着監視も Pro 機能です。",
+                          "en": "Parallel downloads 3-10 (General tab), subfolders via the output filename template (Output tab), and new-video watching are also Pro features."},
     "language_label": {"ja": "言語", "en": "Language"},
     "max_parallel_label": {"ja": "同時ダウンロード数（1〜10）", "en": "Parallel downloads (1-10)"},
     "retry_failed": {"ja": "失敗を再試行", "en": "Retry Failed"},
@@ -627,6 +633,36 @@ def fetch_latest_release():
             "url": data.get("html_url", "")}
 
 
+def find_new_entries(entries, seen_urls):
+    """entries（新しい順）から未見のものを古い順に返す。"""
+    seen = set(seen_urls)
+    new = [e for e in entries if e.get("url") and e["url"] not in seen]
+    return list(reversed(new))
+
+
+class WatchWorker(QThread):
+    """登録URLごとに最新エントリ（最大30件）を取得する。"""
+
+    done = Signal(object)
+
+    def __init__(self, urls, cookies_browser, cookies_file, parent=None):
+        super().__init__(parent)
+        self.urls = urls
+        self.cookies_browser = cookies_browser
+        self.cookies_file = cookies_file
+
+    def run(self):
+        results = {}
+        for url in self.urls:
+            try:
+                entries = get_playlist_entries(
+                    url, self.cookies_browser, self.cookies_file)
+            except Exception:
+                continue
+            results[url] = entries[:30]
+        self.done.emit(results)
+
+
 class UpdateCheckThread(QThread):
     done = Signal(object, bool)
     failed = Signal(str, bool)
@@ -775,6 +811,7 @@ class VibeDLFrame(QMainWindow):
         except (TypeError, ValueError):
             pass
         self.download_history = load_download_history()
+        self.watch_state = load_watch_state()
         self._bg_threads = set()
         self.setAcceptDrops(True)
 
@@ -811,6 +848,12 @@ class VibeDLFrame(QMainWindow):
         self._schedule_timer.setInterval(20000)
         self._schedule_timer.timeout.connect(self._check_schedule)
         self._schedule_timer.start()
+        self._watch_thread = None
+        QTimer.singleShot(4000, self._check_watch)
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(30 * 60 * 1000)
+        self._watch_timer.timeout.connect(self._check_watch)
+        self._watch_timer.start()
 
     # ---------- UI構築 ----------
     def _init_ui(self):
@@ -1004,7 +1047,9 @@ class VibeDLFrame(QMainWindow):
         self.pages.addWidget(download_page)
         self.history_panel = HistoryPanel(self)
         self.pages.addWidget(self.history_panel)
-        self.settings_panel = SettingsPanel(self, self.config)
+        self.settings_panel = SettingsPanel(
+            self, self.config,
+            watch_urls=self.watch_state.get("urls", []))
         self.settings_panel.changed.connect(self._on_settings_panel_changed)
         self.settings_panel.update_check_requested.connect(
             lambda: self.check_for_updates(True))
@@ -1086,6 +1131,55 @@ class VibeDLFrame(QMainWindow):
             if text != self.url_ctrl.currentText().strip():
                 self.url_ctrl.setCurrentText(text)
                 self.log(tr("clipboard_pasted"))
+
+    # ---------- 新着監視（Pro） ----------
+    def _check_watch(self):
+        if not self.pro:
+            return
+        urls = [u for u in self.watch_state.get("urls", []) if u]
+        if not urls:
+            return
+        if self._watch_thread is not None and self._watch_thread.isRunning():
+            return
+        browser, cookie_file = self._cookie_args()
+        self._watch_thread = WatchWorker(urls, browser, cookie_file, self)
+        self._watch_thread.done.connect(self._on_watch_result)
+        self._watch_thread.start()
+
+    def _on_watch_result(self, results):
+        seen_map = self.watch_state.setdefault("seen", {})
+        added = 0
+        for list_url, entries in results.items():
+            entry_urls = [e.get("url", "") for e in entries if e.get("url")]
+            if list_url not in seen_map:
+                # 初回は既存分を既見として記録するだけ（追加しない）
+                seen_map[list_url] = entry_urls[:300]
+                continue
+            for e in find_new_entries(entries, seen_map[list_url]):
+                if self._add_item(e["url"], None, None,
+                                  title=e.get("title"),
+                                  duration=e.get("duration"),
+                                  thumb_url=e.get("thumb")):
+                    added += 1
+            merged = entry_urls + [u for u in seen_map[list_url]
+                                   if u not in entry_urls]
+            seen_map[list_url] = merged[:300]
+        save_watch_state(self.watch_state)
+        if added:
+            self.log(tr("watch_added_log", n=added))
+            self.notify_user(tr("watch_notify_title"),
+                             tr("watch_added_log", n=added))
+
+    def _sync_watch_urls(self):
+        urls = self.settings_panel.get_watch_urls()
+        if urls == self.watch_state.get("urls", []):
+            return
+        self.watch_state["urls"] = urls
+        seen = self.watch_state.setdefault("seen", {})
+        for key in list(seen):
+            if key not in urls:
+                del seen[key]
+        save_watch_state(self.watch_state)
 
     # ---------- 予約ダウンロード・Webhook通知 ----------
     def _check_schedule(self):
@@ -1733,6 +1827,7 @@ class VibeDLFrame(QMainWindow):
         self.update_settings_display()
         self.update_clipboard_monitor()
         self._update_sidebar_pro()
+        self._sync_watch_urls()
 
     # ---------- トレイ・全体進捗 ----------
     def _show_from_tray(self):
@@ -1981,8 +2076,9 @@ class SettingsPanel(QWidget):
     changed = Signal()
     update_check_requested = Signal()
 
-    def __init__(self, parent, config):
+    def __init__(self, parent, config, watch_urls=None):
         super().__init__(parent)
+        self._initial_watch_urls = list(watch_urls or [])
         self.config = dict(config)
         self.config["url_history"] = list(config.get("url_history", []))
         self._init_ui()
@@ -2249,6 +2345,29 @@ class SettingsPanel(QWidget):
         self.lyrics_cb = QCheckBox(tr("embed_lyrics_cb"))
         self.lyrics_cb.setChecked(self.config.get("embed_lyrics", False))
         pro_layout.addWidget(self.lyrics_cb)
+        watch_label = QLabel(tr("watch_label"))
+        watch_label.setObjectName("muted")
+        watch_label.setWordWrap(True)
+        pro_layout.addWidget(watch_label)
+        watch_row = QHBoxLayout()
+        self.watch_ctrl = QLineEdit()
+        self.watch_ctrl.setPlaceholderText(tr("watch_ph"))
+        watch_row.addWidget(self.watch_ctrl, 1)
+        watch_add_btn = QPushButton(tr("watch_add"))
+        watch_add_btn.clicked.connect(self._on_watch_add)
+        watch_row.addWidget(watch_add_btn)
+        pro_layout.addLayout(watch_row)
+        self.watch_list = QListWidget()
+        self.watch_list.setMaximumHeight(90)
+        for _u in self._initial_watch_urls:
+            self.watch_list.addItem(_u)
+        pro_layout.addWidget(self.watch_list)
+        watch_rm_row = QHBoxLayout()
+        watch_rm_btn = QPushButton(tr("watch_remove"))
+        watch_rm_btn.clicked.connect(self._on_watch_remove)
+        watch_rm_row.addWidget(watch_rm_btn)
+        watch_rm_row.addStretch()
+        pro_layout.addLayout(watch_rm_row)
         tp_row = QHBoxLayout()
         tp_row.addWidget(QLabel(tr("tp_label")))
         self.tp_spin = QDoubleSpinBox()
@@ -2325,6 +2444,25 @@ class SettingsPanel(QWidget):
 
     def _on_license_check(self):
         self._update_license_status()
+
+    def _on_watch_add(self):
+        url = self.watch_ctrl.text().strip()
+        if not url.startswith("http"):
+            return
+        if url in self.get_watch_urls():
+            return
+        self.watch_list.addItem(url)
+        self.watch_ctrl.clear()
+        self._schedule_apply()
+
+    def _on_watch_remove(self):
+        for item in self.watch_list.selectedItems():
+            self.watch_list.takeItem(self.watch_list.row(item))
+        self._schedule_apply()
+
+    def get_watch_urls(self):
+        return [self.watch_list.item(i).text()
+                for i in range(self.watch_list.count())]
 
     def get_config(self):
         self.config["output_format"] = self.fmt_combo.currentText()
