@@ -48,7 +48,7 @@ except Exception:  # QtMultimedia が無い環境ではプレビューを無効�
 from license_check import is_pro as _license_is_pro, parse_license_key
 
 PRO_PURCHASE_URL = "https://buy.stripe.com/aFabJ2c9w9TubQO1GI0co01"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 UPDATE_API_URL = ("https://api.github.com/repos/fancyverbena/VibeDL"
                   "/releases/latest")
 from audio_processor import (
