@@ -73,6 +73,12 @@ YouTube から最高の「Vibe（雰囲気）」をそのままに、音量を�
 
 ## インストール
 
+### exe版（おすすめ）
+
+[Releases](https://github.com/fancyverbena/VibeDL/releases) から最新の `VibeDL.exe` をダウンロードして実行してください。
+
+> **初回起動時の注意**: 起動時に「Windows によって PC が保護されました」と表示される場合があります。これはコード署名がまだないための Windows SmartScreen の確認画面で、マルウェアの警告ではありません。「詳細情報」→「実行」の順に押すと起動できます。（署名の取得を進めています）
+
 ### ソースコードから
 
 ```bash
