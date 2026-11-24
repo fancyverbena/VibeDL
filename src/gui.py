@@ -4,6 +4,7 @@ wxPython 版から移行した GUI。見た目は QSS（Qt Style Sheets）で
 一元管理し、カード型レイアウト + アクセントカラーで統一している。
 ダウンロード・音声処理・設定保存は従来モジュールをそのまま使う。
 """
+import json
 import os
 import re
 import subprocess
@@ -34,6 +35,9 @@ from downloader import (
 from license_check import is_pro as _license_is_pro, parse_license_key
 
 PRO_PURCHASE_URL = "https://buy.stripe.com/aFabJ2c9w9TubQO1GI0co01"
+APP_VERSION = "1.0.0"
+UPDATE_API_URL = ("https://api.github.com/repos/fancyverbena/VibeDL"
+                  "/releases/latest")
 from audio_processor import (
     normalize_audio, embed_metadata, trim_and_fade, split_into_chapters,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
@@ -169,6 +173,12 @@ TEXTS = {
     "tray_show": {"ja": "表示", "en": "Show"},
     "tray_quit": {"ja": "終了", "en": "Quit"},
     "tray_minimized": {"ja": "タスクトレイに格納しました（ダウンロードは継続します）", "en": "Minimized to tray (downloads continue)"},
+    "update_cb": {"ja": "起動時にアップデートを確認", "en": "Check for updates on startup"},
+    "update_check_btn": {"ja": "今すぐアップデートを確認", "en": "Check for updates now"},
+    "update_available_title": {"ja": "アップデートがあります", "en": "Update available"},
+    "update_available_msg": {"ja": "新しいバージョン {tag} が公開されています（現在 {current}）。\nダウンロードページを開きますか？", "en": "A new version {tag} is available (current: {current}).\nOpen the download page?"},
+    "update_latest_msg": {"ja": "すでに最新バージョンです（{current}）", "en": "You are on the latest version ({current})"},
+    "update_failed_msg": {"ja": "アップデートの確認に失敗しました", "en": "Failed to check for updates"},
     "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
     "status_overall": {"ja": "全体 {pct}%", "en": "Overall {pct}%"},
     "status_overall_eta": {"ja": "全体 {pct}% ・ 残り約 {eta}", "en": "Overall {pct}% · about {eta} left"},
@@ -584,6 +594,42 @@ class FFmpegDownloadThread(QThread):
         self.done.emit(path)
 
 
+def parse_version(text):
+    """'Release-1.2.3' や 'v1.2.3' から (1, 2, 3) を取り出す。"""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    if not m:
+        return None
+    return tuple(int(x) for x in m.groups())
+
+
+def fetch_latest_release():
+    """GitHub の最新リリース情報を dict で返す（失敗時は例外）。"""
+    req = urllib.request.Request(
+        UPDATE_API_URL,
+        headers={"User-Agent": f"VibeDL/{APP_VERSION}",
+                 "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return {"version": parse_version(data.get("tag_name", "")),
+            "tag": data.get("tag_name", ""),
+            "url": data.get("html_url", "")}
+
+
+class UpdateCheckThread(QThread):
+    done = Signal(object, bool)
+    failed = Signal(str, bool)
+
+    def __init__(self, manual=False, parent=None):
+        super().__init__(parent)
+        self.manual = manual
+
+    def run(self):
+        try:
+            self.done.emit(fetch_latest_release(), self.manual)
+        except Exception as e:
+            self.failed.emit(str(e), self.manual)
+
+
 def format_duration(seconds):
     if not seconds:
         return "--:--"
@@ -746,6 +792,8 @@ class VibeDLFrame(QMainWindow):
         self.update_clipboard_monitor()
 
         QTimer.singleShot(100, self.check_ffmpeg_on_startup)
+        if self.config.get("check_updates", True):
+            QTimer.singleShot(1500, lambda: self.check_for_updates(False))
 
     # ---------- UI構築 ----------
     def _init_ui(self):
@@ -941,6 +989,8 @@ class VibeDLFrame(QMainWindow):
         self.pages.addWidget(self.history_panel)
         self.settings_panel = SettingsPanel(self, self.config)
         self.settings_panel.changed.connect(self._on_settings_panel_changed)
+        self.settings_panel.update_check_requested.connect(
+            lambda: self.check_for_updates(True))
         self.pages.addWidget(self.settings_panel)
         self._update_sidebar_pro()
 
@@ -1019,6 +1069,47 @@ class VibeDLFrame(QMainWindow):
             if text != self.url_ctrl.currentText().strip():
                 self.url_ctrl.setCurrentText(text)
                 self.log(tr("clipboard_pasted"))
+
+    # ---------- アップデート確認 ----------
+    def check_for_updates(self, manual=False):
+        if getattr(self, "_update_thread", None) is not None \
+                and self._update_thread.isRunning():
+            if manual:
+                # 実行中の自動チェックを手動扱いに昇格させる
+                self._update_thread.manual = True
+            return
+        self._update_thread = UpdateCheckThread(manual, self)
+        self._update_thread.done.connect(self._on_update_checked)
+        self._update_thread.failed.connect(self._on_update_check_failed)
+        self._update_thread.start()
+
+    def _on_update_checked(self, info, manual=False):
+        latest = info.get("version")
+        if latest is None:
+            # タグからバージョンを読めなかったら「最新」とは言わず失敗扱い
+            if manual:
+                QMessageBox.warning(self, tr("update_available_title"),
+                                    tr("update_failed_msg"))
+            return
+        current = parse_version(APP_VERSION)
+        if current and latest > current:
+            answer = QMessageBox.question(
+                self, tr("update_available_title"),
+                tr("update_available_msg", tag=info.get("tag", ""),
+                   current=APP_VERSION))
+            if answer == QMessageBox.Yes and info.get("url"):
+                webbrowser.open(info["url"])
+        elif manual:
+            QMessageBox.information(
+                self, tr("update_available_title"),
+                tr("update_latest_msg", current=APP_VERSION))
+
+    def _on_update_check_failed(self, message, manual=False):
+        if manual:
+            QMessageBox.warning(self, tr("update_available_title"),
+                                  tr("update_failed_msg"))
+        else:
+            self.log(tr("update_failed_msg"))
 
     # ---------- FFmpeg ----------
     def check_ffmpeg_on_startup(self):
@@ -1631,6 +1722,11 @@ class VibeDLFrame(QMainWindow):
             self.tray.showMessage(
                 "VibeDL", tr("tray_minimized"), make_app_icon(), 3000)
             return
+        # 実行中のアップデート確認スレッドは、ウィンドウ破棄前に
+        # 終わるのを待つ（取得タイムアウト6秒＋余裕）
+        if getattr(self, "_update_thread", None) is not None \
+                and self._update_thread.isRunning():
+            self._update_thread.wait(8000)
         super().closeEvent(event)
 
 
@@ -1795,6 +1891,7 @@ class SettingsPanel(QWidget):
     """設定ページ。変更はデバウンスして changed シグナルで通知する。"""
 
     changed = Signal()
+    update_check_requested = Signal()
 
     def __init__(self, parent, config):
         super().__init__(parent)
@@ -1919,6 +2016,15 @@ class SettingsPanel(QWidget):
         self.tray_cb = QCheckBox(tr("tray_cb"))
         self.tray_cb.setChecked(self.config.get("minimize_to_tray", False))
         general_layout.addWidget(self.tray_cb)
+        self.update_cb = QCheckBox(tr("update_cb"))
+        self.update_cb.setChecked(self.config.get("check_updates", True))
+        general_layout.addWidget(self.update_cb)
+        self.update_btn = QPushButton(tr("update_check_btn"))
+        self.update_btn.clicked.connect(self.update_check_requested.emit)
+        update_row = QHBoxLayout()
+        update_row.addWidget(self.update_btn)
+        update_row.addStretch()
+        general_layout.addLayout(update_row)
         self.clipboard_cb = QCheckBox(tr("clipboard_cb"))
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
@@ -2127,6 +2233,7 @@ class SettingsPanel(QWidget):
             self._theme_values[self.theme_combo.currentIndex()]
         self.config["dark_mode"] = self.config["theme_mode"] == "dark"
         self.config["minimize_to_tray"] = self.tray_cb.isChecked()
+        self.config["check_updates"] = self.update_cb.isChecked()
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
