@@ -5,9 +5,11 @@ wxPython 版から移行した GUI。見た目は QSS（Qt Style Sheets）で
 ダウンロード・音声処理・設定保存は従来モジュールをそのまま使う。
 """
 import csv
+import ctypes
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -17,13 +19,14 @@ import urllib.request
 import winsound
 from datetime import datetime
 
-from PySide6.QtCore import QSize, Qt, QThread, QTime, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
-    QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPlainTextEdit,
     QProgressBar, QProgressDialog, QPushButton, QSpinBox, QTabWidget,
@@ -32,9 +35,14 @@ from PySide6.QtWidgets import (
 )
 
 from downloader import (
-    download_audio, search_youtube, get_playlist_entries, get_video_info,
-    clean_title, get_unique_path,
+    JS_RUNTIMES, download_audio, search_youtube, get_playlist_entries,
+    get_video_info, clean_title, get_unique_path,
 )
+
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+except Exception:  # QtMultimedia が無い環境ではプレビューを無効化
+    QAudioOutput = QMediaPlayer = None
 from license_check import is_pro as _license_is_pro, parse_license_key
 
 PRO_PURCHASE_URL = "https://buy.stripe.com/aFabJ2c9w9TubQO1GI0co01"
@@ -42,12 +50,14 @@ APP_VERSION = "1.0.0"
 UPDATE_API_URL = ("https://api.github.com/repos/fancyverbena/VibeDL"
                   "/releases/latest")
 from audio_processor import (
-    normalize_audio, embed_metadata, trim_and_fade, split_into_chapters,
+    convert_audio, normalize_audio, embed_metadata, read_tags,
+    trim_and_fade, split_into_chapters, update_tags,
     get_ffmpeg_info, check_ffmpeg, download_ffmpeg,
 )
 from config_store import (
     get_config, save_config, load_download_history, save_download_history,
-    load_queue_items, save_queue_items, load_watch_state, save_watch_state,
+    load_presets, load_queue_items, save_presets, save_queue_items,
+    load_watch_state, save_watch_state,
 )
 
 CURRENT_LANG = "ja"
@@ -197,6 +207,35 @@ TEXTS = {
     "watch_remove": {"ja": "選択を削除", "en": "Remove selected"},
     "watch_added_log": {"ja": "新着監視: {n}件の新着をキューに追加しました", "en": "Watch: added {n} new video(s) to the queue"},
     "watch_notify_title": {"ja": "新着動画", "en": "New videos"},
+    "preset_label": {"ja": "プリセット", "en": "Presets"},
+    "preset_save": {"ja": "保存", "en": "Save"},
+    "preset_apply": {"ja": "適用", "en": "Apply"},
+    "preset_delete": {"ja": "削除", "en": "Delete"},
+    "preset_name_title": {"ja": "プリセット名", "en": "Preset name"},
+    "preset_name_label": {"ja": "プリセットの名前", "en": "Name for the preset"},
+    "prevent_sleep_cb": {"ja": "ダウンロード中はスリープを防止", "en": "Prevent sleep while downloading"},
+    "preview_play": {"ja": "プレビュー再生", "en": "Preview"},
+    "preview_stop": {"ja": "プレビュー停止", "en": "Stop preview"},
+    "preview_unavailable": {"ja": "プレビューを再生できませんでした", "en": "Could not play the preview"},
+    "disk_warn_title": {"ja": "空き容量の警告", "en": "Low disk space"},
+    "disk_warn_msg": {"ja": "保存先の空き容量が不足している可能性があります（空き {free} MB／推定必要 {need} MB）。続行しますか？", "en": "The destination may be low on space ({free} MB free, about {need} MB needed). Continue?"},
+    "convert_btn": {"ja": "ローカル変換（Pro）", "en": "Convert files (Pro)"},
+    "convert_title": {"ja": "ローカルファイル一括変換", "en": "Convert local files"},
+    "convert_add": {"ja": "ファイルを追加", "en": "Add files"},
+    "convert_remove": {"ja": "選択を削除", "en": "Remove selected"},
+    "convert_start": {"ja": "変換開始", "en": "Start conversion"},
+    "convert_done_log": {"ja": "変換が完了しました: {name}", "en": "Converted: {name}"},
+    "convert_failed_log": {"ja": "変換に失敗しました: {name}", "en": "Conversion failed: {name}"},
+    "convert_pro_only": {"ja": "この機能は Pro 版で利用できます", "en": "This feature requires Pro"},
+    "filter_audio": {"ja": "音声ファイル (*.mp3 *.m4a *.wav *.flac *.opus *.ogg)", "en": "Audio files (*.mp3 *.m4a *.wav *.flac *.opus *.ogg)"},
+    "tag_edit_btn": {"ja": "タグ編集", "en": "Edit tags"},
+    "tag_title": {"ja": "タグ編集", "en": "Edit tags"},
+    "tag_title_label": {"ja": "タイトル", "en": "Title"},
+    "tag_artist_label": {"ja": "アーティスト", "en": "Artist"},
+    "tag_album_label": {"ja": "アルバム", "en": "Album"},
+    "tag_saved": {"ja": "タグを保存しました", "en": "Tags saved"},
+    "tag_failed": {"ja": "タグの保存に失敗しました", "en": "Failed to save tags"},
+    "mirror_label": {"ja": "ミラー出力先（Pro）", "en": "Mirror folder (Pro)"},
     "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
     "status_overall": {"ja": "全体 {pct}%", "en": "Overall {pct}%"},
     "status_overall_eta": {"ja": "全体 {pct}% ・ 残り約 {eta}", "en": "Overall {pct}% · about {eta} left"},
@@ -663,6 +702,92 @@ class WatchWorker(QThread):
         self.done.emit(results)
 
 
+class StreamUrlWorker(QThread):
+    """プレビュー再生用にストリームURLを解決する。"""
+
+    got = Signal(object, str)
+    failed = Signal(object)
+
+    def __init__(self, item, parent=None):
+        super().__init__(parent)
+        self.item = item
+
+    def run(self):
+        try:
+            import yt_dlp
+            opts = {
+                'quiet': True, 'no_warnings': True, 'skip_download': True,
+                'format': 'bestaudio/best',
+                'js_runtimes': JS_RUNTIMES,
+                'remote_components': ['ejs:github'],
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(self.item.url, download=False)
+            url = info.get('url') or ''
+            if not url:
+                audio_fmts = [f for f in info.get('formats') or []
+                              if f.get('acodec') not in (None, 'none')
+                              and f.get('url')]
+                if audio_fmts:
+                    url = audio_fmts[-1]['url']
+            if url:
+                self.got.emit(self.item, url)
+            else:
+                self.failed.emit(self.item)
+        except Exception:
+            self.failed.emit(self.item)
+
+
+class ConvertWorker(QThread):
+    """ローカルファイル一括変換（Pro）用ワーカー。"""
+
+    log = Signal(str)
+    done = Signal()
+
+    def __init__(self, files, config, ffmpeg_info, parent=None):
+        super().__init__(parent)
+        self.files = files
+        self.config = config
+        self.ffmpeg_info = ffmpeg_info
+
+    def run(self):
+        fmt = self.config.get('output_format', 'mp3')
+        bitrate = self.config.get('bitrate')
+        for path in self.files:
+            base, src_ext = os.path.splitext(path)
+            dest = get_unique_path(f"{base}.{fmt}")
+            ok = True
+            if src_ext.lower() == f".{fmt}" and \
+                    not self.config.get('normalize'):
+                try:
+                    shutil.copy2(path, dest)
+                except OSError:
+                    ok = False
+            else:
+                out = convert_audio(path, dest, self.ffmpeg_info, bitrate)
+                if not out:
+                    ok = False
+                elif self.config.get('normalize'):
+                    normalized = normalize_audio(
+                        out, self.config.get('target_lufs', -14.0),
+                        self.ffmpeg_info, bitrate,
+                        self.config.get('loudnorm_tp', -2.0))
+                    if normalized:
+                        os.replace(normalized, out)
+            if ok and self.config.get('embed_metadata'):
+                try:
+                    embed_metadata(dest, os.path.basename(base), '', None)
+                except Exception:
+                    pass
+            if ok:
+                self.log.emit(tr("convert_done_log",
+                                 name=os.path.basename(dest)))
+            else:
+                self.log.emit(tr("convert_failed_log",
+                                 name=os.path.basename(path)))
+        self.done.emit()
+
+
 class UpdateCheckThread(QThread):
     done = Signal(object, bool)
     failed = Signal(str, bool)
@@ -854,6 +979,14 @@ class VibeDLFrame(QMainWindow):
         self._watch_timer.setInterval(30 * 60 * 1000)
         self._watch_timer.timeout.connect(self._check_watch)
         self._watch_timer.start()
+        self._sleep_prevented = False
+        self._preview_item = None
+        self._preview_player = None
+        self._preview_audio = None
+        if QMediaPlayer is not None:
+            self._preview_audio = QAudioOutput(self)
+            self._preview_player = QMediaPlayer(self)
+            self._preview_player.setAudioOutput(self._preview_audio)
 
     # ---------- UI構築 ----------
     def _init_ui(self):
@@ -976,6 +1109,9 @@ class VibeDLFrame(QMainWindow):
         self.open_folder_btn.clicked.connect(self.on_open_folder)
         self.open_folder_btn.setEnabled(False)
         btn_row2.addWidget(self.open_folder_btn)
+        self.convert_btn = QPushButton(tr("convert_btn"))
+        self.convert_btn.clicked.connect(self.on_convert_local)
+        btn_row2.addWidget(self.convert_btn)
         self.play_btn = QPushButton(tr("play"))
         self.play_btn.setToolTip(tr("play_tip"))
         self.play_btn.clicked.connect(self.on_play_last)
@@ -1536,6 +1672,12 @@ class VibeDLFrame(QMainWindow):
         if item is None:
             return
         menu = QMenu(self)
+        if self._preview_item is item and self._preview_player is not None \
+                and self._preview_player.playbackState() == \
+                QMediaPlayer.PlaybackState.PlayingState:
+            act_preview = menu.addAction(tr("preview_stop"))
+        else:
+            act_preview = menu.addAction(tr("preview_play"))
         act_copy = menu.addAction(tr("ctx_copy_url"))
         act_open = menu.addAction(tr("ctx_open_browser"))
         act_retry = None
@@ -1552,7 +1694,9 @@ class VibeDLFrame(QMainWindow):
                 for i in selected):
             act_remove_sel = menu.addAction(tr("ctx_remove_selected"))
         action = menu.exec(self.queue_list.mapToGlobal(pos))
-        if action == act_copy:
+        if action == act_preview:
+            self.toggle_preview(item)
+        elif action == act_copy:
             QApplication.clipboard().setText(item.url)
         elif action == act_open:
             webbrowser.open(item.url)
@@ -1568,6 +1712,61 @@ class VibeDLFrame(QMainWindow):
             self.update_queue_display()
         elif act_remove_sel is not None and action == act_remove_sel:
             self._remove_selected_items()
+
+    # ---------- ミラー出力・ローカル変換（Pro） ----------
+    def _mirror_file(self, dest_path):
+        folder = str(self.config.get("mirror_folder", "")).strip()
+        if not self.pro or not folder:
+            return
+
+        def _copy():
+            try:
+                os.makedirs(folder, exist_ok=True)
+                target = os.path.join(folder, os.path.basename(dest_path))
+                if os.path.abspath(target) != os.path.abspath(dest_path):
+                    shutil.copy2(dest_path, target)
+            except Exception:
+                pass
+
+        threading.Thread(target=_copy, daemon=True).start()
+
+    def on_convert_local(self):
+        if not self.pro:
+            QMessageBox.information(self, "VibeDL", tr("convert_pro_only"))
+            return
+        LocalConvertDialog(self).exec()
+
+    # ---------- プレビュー再生 ----------
+    def toggle_preview(self, item):
+        if self._preview_player is None:
+            QMessageBox.information(self, "VibeDL",
+                                    tr("preview_unavailable"))
+            return
+        if self._preview_item is item and \
+                self._preview_player.playbackState() == \
+                QMediaPlayer.PlaybackState.PlayingState:
+            self._preview_player.stop()
+            self._preview_item = None
+            return
+        worker = StreamUrlWorker(item, self)
+        worker.got.connect(self._on_preview_url)
+        worker.failed.connect(
+            lambda _item: QMessageBox.information(
+                self, "VibeDL", tr("preview_unavailable")))
+        self._keep_thread(worker)
+        worker.start()
+
+    def _on_preview_url(self, item, url):
+        if self._preview_player is None:
+            return
+        self._preview_item = item
+        self._preview_player.setSource(QUrl(url))
+        self._preview_player.play()
+
+    def _stop_preview(self):
+        if self._preview_player is not None:
+            self._preview_player.stop()
+        self._preview_item = None
 
     def _remove_selected_items(self):
         selected = [lw.data(Qt.UserRole)
@@ -1585,7 +1784,53 @@ class VibeDLFrame(QMainWindow):
         if not self.queue:
             QMessageBox.information(self, tr("info_title"), tr("queue_empty"))
             return
+        if not self._check_disk_space():
+            return
         self.start_queue()
+
+    def _estimate_needed_bytes(self):
+        total_dur = sum(i.duration or 0 for i in self.queue
+                        if i.status == "waiting")
+        try:
+            kbps = int(str(self.config.get("bitrate", "256k"))
+                       .rstrip("kK"))
+        except ValueError:
+            kbps = 256
+        if total_dur:
+            return int(total_dur * kbps * 1000 / 8 * 1.2)
+        return 200 * 1024 * 1024
+
+    def _check_disk_space(self):
+        folder = self.config.get("output_folder", "")
+        if not folder or not os.path.isdir(folder):
+            return True
+        try:
+            free = shutil.disk_usage(folder).free
+        except OSError:
+            return True
+        need = self._estimate_needed_bytes()
+        if free >= need:
+            return True
+        answer = QMessageBox.question(
+            self, tr("disk_warn_title"),
+            tr("disk_warn_msg", free=free // (1024 * 1024),
+               need=need // (1024 * 1024)))
+        return answer == QMessageBox.Yes
+
+    def _set_sleep_prevention(self, active):
+        if not self.config.get("prevent_sleep", False):
+            active = False
+        if self._sleep_prevented == active:
+            return
+        self._sleep_prevented = active
+        try:
+            if active:
+                ctypes.windll.kernel32.SetThreadExecutionState(
+                    0x80000000 | 0x00000001)  # ES_CONTINUOUS | SYSTEM_REQUIRED
+            else:
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+        except Exception:
+            pass
 
     def start_queue(self):
         # 実行中のワーカーがある場合は進捗表示をリセットしない（設定変更で
@@ -1617,6 +1862,7 @@ class VibeDLFrame(QMainWindow):
             self.cancel_btn.setEnabled(True)
             self.update_queue_display()
             worker.start()
+        self._set_sleep_prevention(bool(self.active_workers))
 
     def on_cancel_downloads(self):
         if not self.active_workers:
@@ -1650,6 +1896,7 @@ class VibeDLFrame(QMainWindow):
                 self.open_folder_btn.setEnabled(True)
                 self.play_btn.setEnabled(True)
                 self._record_download_history(item, dest_path)
+                self._mirror_file(dest_path)
                 self.notify_user(tr("notify_complete"), os.path.basename(dest_path))
                 self.queue.remove(item)
                 self._batch_success = True
@@ -1673,6 +1920,7 @@ class VibeDLFrame(QMainWindow):
             self.active_workers.remove(sender)
         self.update_queue_display()
         self._update_overall_status()
+        self._set_sleep_prevention(bool(self.active_workers))
         if any(i.status == "waiting" for i in self.queue):
             self.start_queue()
         elif not self.active_workers:
@@ -1869,6 +2117,7 @@ class VibeDLFrame(QMainWindow):
             self.queue_empty_label.setGeometry(self.queue_list.rect())
 
     def closeEvent(self, event):
+        self._stop_preview()
         # ウィンドウ位置・サイズを保存
         self.config["window_x"] = self.x()
         self.config["window_y"] = self.y()
@@ -1995,6 +2244,9 @@ class HistoryPanel(QWidget):
         export_btn = QPushButton(tr("export_csv_btn"))
         export_btn.clicked.connect(self.on_export_csv)
         btn_row.addWidget(export_btn)
+        tag_btn = QPushButton(tr("tag_edit_btn"))
+        tag_btn.clicked.connect(self.on_tag_edit)
+        btn_row.addWidget(tag_btn)
         play_btn = QPushButton(tr("play2"))
         play_btn.clicked.connect(self.on_play)
         btn_row.addWidget(play_btn)
@@ -2029,6 +2281,51 @@ class HistoryPanel(QWidget):
     def _selected_entry(self):
         item = self.list_widget.currentItem()
         return item.data(Qt.UserRole) if item else None
+
+    def on_tag_edit(self):
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+        entry = item.data(Qt.UserRole)
+        if not entry:
+            return
+        path = entry.get("path", "")
+        if not path or not os.path.exists(path):
+            return
+        tags = read_tags(path)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("tag_title"))
+        form = QVBoxLayout(dialog)
+        title_edit = QLineEdit(tags.get("title") or entry.get("title", ""))
+        artist_edit = QLineEdit(tags.get("artist", ""))
+        album_edit = QLineEdit(tags.get("album", ""))
+        for label, edit in ((tr("tag_title_label"), title_edit),
+                            (tr("tag_artist_label"), artist_edit),
+                            (tr("tag_album_label"), album_edit)):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            row.addWidget(edit, 1)
+            form.addLayout(row)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.setObjectName("primary")
+        ok_btn.clicked.connect(dialog.accept)
+        btn_row.addWidget(ok_btn)
+        cancel_btn = QPushButton(tr("cancel"))
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addWidget(cancel_btn)
+        form.addLayout(btn_row)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        if update_tags(path, title_edit.text(), artist_edit.text(),
+                       album_edit.text()):
+            entry["title"] = title_edit.text()
+            save_download_history(self.frame.download_history)
+            self.refresh(self.frame.download_history)
+            QMessageBox.information(self, "VibeDL", tr("tag_saved"))
+        else:
+            QMessageBox.warning(self, "VibeDL", tr("tag_failed"))
 
     def on_export_csv(self):
         entries = self.frame.download_history
@@ -2068,6 +2365,64 @@ class HistoryPanel(QWidget):
         start_sec, end_sec = time_range
         self.frame._dispatch_add(entry['url'], start_sec, end_sec)
         self.frame._switch_page(0)
+
+
+class LocalConvertDialog(QDialog):
+    """ローカルファイル一括変換ダイアログ（Pro）。現在の設定で変換する。"""
+
+    def __init__(self, frame):
+        super().__init__(frame)
+        self.frame = frame
+        self.setWindowTitle(tr("convert_title"))
+        self.resize(520, 420)
+        layout = QVBoxLayout(self)
+        self.list_widget = QListWidget()
+        layout.addWidget(self.list_widget, 1)
+        self.log_label = QLabel("")
+        self.log_label.setObjectName("muted")
+        layout.addWidget(self.log_label)
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton(tr("convert_add"))
+        add_btn.clicked.connect(self._on_add)
+        btn_row.addWidget(add_btn)
+        rm_btn = QPushButton(tr("convert_remove"))
+        rm_btn.clicked.connect(self._on_remove)
+        btn_row.addWidget(rm_btn)
+        btn_row.addStretch()
+        self.start_btn = QPushButton(tr("convert_start"))
+        self.start_btn.setObjectName("primary")
+        self.start_btn.clicked.connect(self._on_start)
+        btn_row.addWidget(self.start_btn)
+        close_btn = QPushButton(tr("cancel"))
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        self._worker = None
+
+    def _on_add(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, tr("convert_add"), "", tr("filter_audio"))
+        for path in paths:
+            if not self.list_widget.findItems(path, Qt.MatchExactly):
+                self.list_widget.addItem(path)
+
+    def _on_remove(self):
+        for item in self.list_widget.selectedItems():
+            self.list_widget.takeItem(self.list_widget.row(item))
+
+    def _on_start(self):
+        files = [self.list_widget.item(i).text()
+                 for i in range(self.list_widget.count())]
+        if not files:
+            return
+        self.start_btn.setEnabled(False)
+        self._worker = ConvertWorker(
+            files, self.frame.config, self.frame.ffmpeg_info, self)
+        self._worker.log.connect(
+            lambda msg: self.log_label.setText(msg))
+        self._worker.done.connect(
+            lambda: self.start_btn.setEnabled(True))
+        self._worker.start()
 
 
 class SettingsPanel(QWidget):
@@ -2122,6 +2477,14 @@ class SettingsPanel(QWidget):
         self.name_template_ctrl.setPlaceholderText("{title} - {uploader}")
         name_row.addWidget(self.name_template_ctrl, 1)
         out_layout.addLayout(name_row)
+        mirror_row = QHBoxLayout()
+        mirror_row.addWidget(QLabel(tr("mirror_label")))
+        self.mirror_ctrl = QLineEdit(self.config.get("mirror_folder", ""))
+        mirror_row.addWidget(self.mirror_ctrl, 1)
+        mirror_browse_btn = QPushButton(tr("browse"))
+        mirror_browse_btn.clicked.connect(self.on_browse_mirror)
+        mirror_row.addWidget(mirror_browse_btn)
+        out_layout.addLayout(mirror_row)
         template_note = QLabel(tr("template_note"))
         template_note.setObjectName("muted")
         out_layout.addWidget(template_note)
@@ -2231,6 +2594,10 @@ class SettingsPanel(QWidget):
             "https://discord.com/api/webhooks/...")
         webhook_row.addWidget(self.webhook_ctrl, 1)
         general_layout.addLayout(webhook_row)
+        self.prevent_sleep_cb = QCheckBox(tr("prevent_sleep_cb"))
+        self.prevent_sleep_cb.setChecked(
+            self.config.get("prevent_sleep", False))
+        general_layout.addWidget(self.prevent_sleep_cb)
         self.clipboard_cb = QCheckBox(tr("clipboard_cb"))
         self.clipboard_cb.setChecked(self.config.get("clipboard_monitor", False))
         general_layout.addWidget(self.clipboard_cb)
@@ -2386,6 +2753,21 @@ class SettingsPanel(QWidget):
         tabs.addTab(pro_tab, tr("tab_pro"))
         self.on_normalize_toggle()
 
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel(tr("preset_label")))
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItems(sorted(load_presets().keys()))
+        preset_row.addWidget(self.preset_combo, 1)
+        preset_save_btn = QPushButton(tr("preset_save"))
+        preset_save_btn.clicked.connect(self._on_preset_save)
+        preset_row.addWidget(preset_save_btn)
+        preset_apply_btn = QPushButton(tr("preset_apply"))
+        preset_apply_btn.clicked.connect(self._on_preset_apply)
+        preset_row.addWidget(preset_apply_btn)
+        preset_del_btn = QPushButton(tr("preset_delete"))
+        preset_del_btn.clicked.connect(self._on_preset_delete)
+        preset_row.addWidget(preset_del_btn)
+        layout.addLayout(preset_row)
         layout.addWidget(tabs)
         self._wire_live_apply()
 
@@ -2445,6 +2827,82 @@ class SettingsPanel(QWidget):
     def _on_license_check(self):
         self._update_license_status()
 
+    PRESET_KEYS = (
+        "output_format", "bitrate", "output_folder", "target_lufs",
+        "loudnorm_tp", "normalize", "embed_metadata", "embed_lyrics",
+        "split_chapters", "trim_silence", "fade_enabled", "fade_seconds",
+        "name_template", "rate_limit_mbps", "auto_retry", "max_parallel",
+    )
+
+    def _on_preset_save(self):
+        name, ok = QInputDialog.getText(
+            self, tr("preset_name_title"), tr("preset_name_label"))
+        name = name.strip()
+        if not ok or not name:
+            return
+        presets = load_presets()
+        current = self.get_config()
+        presets[name] = {k: current.get(k) for k in self.PRESET_KEYS}
+        save_presets(presets)
+        if self.preset_combo.findText(name) < 0:
+            self.preset_combo.addItem(name)
+        self.preset_combo.setCurrentText(name)
+
+    def _on_preset_apply(self):
+        name = self.preset_combo.currentText()
+        preset = load_presets().get(name)
+        if not preset:
+            return
+        if "output_format" in preset:
+            self.fmt_combo.setCurrentText(str(preset["output_format"]))
+        if "bitrate" in preset:
+            self.br_combo.setCurrentText(str(preset["bitrate"]))
+        if "output_folder" in preset:
+            self.folder_ctrl.setText(str(preset["output_folder"]))
+        if "target_lufs" in preset:
+            self.lufs_spin.setValue(float(preset["target_lufs"]))
+        if "loudnorm_tp" in preset:
+            self.tp_spin.setValue(float(preset["loudnorm_tp"]))
+        if "normalize" in preset:
+            self.normalize_cb.setChecked(bool(preset["normalize"]))
+        if "embed_metadata" in preset:
+            self.meta_cb.setChecked(bool(preset["embed_metadata"]))
+        if "embed_lyrics" in preset:
+            self.lyrics_cb.setChecked(bool(preset["embed_lyrics"]))
+        if "split_chapters" in preset:
+            self.split_cb.setChecked(bool(preset["split_chapters"]))
+        if "trim_silence" in preset:
+            self.trim_cb.setChecked(bool(preset["trim_silence"]))
+        if "fade_enabled" in preset:
+            self.fade_cb.setChecked(bool(preset["fade_enabled"]))
+        if "fade_seconds" in preset:
+            self.fade_spin.setValue(float(preset["fade_seconds"]))
+        if "name_template" in preset:
+            self.name_template_ctrl.setText(str(preset["name_template"]))
+        if "rate_limit_mbps" in preset:
+            self.rate_spin.setValue(float(preset["rate_limit_mbps"]))
+        if "auto_retry" in preset:
+            self.retry_spin.setValue(int(preset["auto_retry"]))
+        if "max_parallel" in preset:
+            self.parallel_spin.setValue(int(preset["max_parallel"]))
+        self._schedule_apply()
+
+    def _on_preset_delete(self):
+        name = self.preset_combo.currentText()
+        presets = load_presets()
+        if name in presets:
+            del presets[name]
+            save_presets(presets)
+        index = self.preset_combo.findText(name)
+        if index >= 0:
+            self.preset_combo.removeItem(index)
+
+    def on_browse_mirror(self):
+        path = QFileDialog.getExistingDirectory(
+            self, tr("folder_dialog"), self.mirror_ctrl.text())
+        if path:
+            self.mirror_ctrl.setText(path)
+
     def _on_watch_add(self):
         url = self.watch_ctrl.text().strip()
         if not url.startswith("http"):
@@ -2486,6 +2944,8 @@ class SettingsPanel(QWidget):
         self.config["schedule_time"] = \
             self.schedule_time.time().toString("HH:mm")
         self.config["webhook_url"] = self.webhook_ctrl.text().strip()
+        self.config["prevent_sleep"] = self.prevent_sleep_cb.isChecked()
+        self.config["mirror_folder"] = self.mirror_ctrl.text().strip()
         self.config["notify_sound"] = self.sound_cb.isChecked()
         self.config["notify_toast"] = self.toast_cb.isChecked()
         self.config["clipboard_monitor"] = self.clipboard_cb.isChecked()
