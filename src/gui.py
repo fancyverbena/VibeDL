@@ -19,9 +19,11 @@ import urllib.request
 import winsound
 from datetime import datetime
 
-from PySide6.QtCore import QSize, Qt, QThread, QTime, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QPointF, QSize, Qt, QThread, QTime, QTimer, QUrl, Signal,
+)
 from PySide6.QtGui import (
-    QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut,
+    QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
@@ -259,6 +261,7 @@ TEXTS = {
     "history_bulk_delete": {"ja": "選択を削除", "en": "Delete selected"},
     "history_delete_confirm": {"ja": "選択した履歴を削除しますか？", "en": "Delete the selected history entries?"},
     "confirm_title": {"ja": "確認", "en": "Confirm"},
+    "template_preview_label": {"ja": "プレビュー: {name}", "en": "Preview: {name}"},
     "rename_rules_label": {"ja": "スマートリネーム（Pro）: ファイル名への正規表現ルール（1行に1つ。「パターン => 置換」、パターンのみで削除）", "en": "Smart rename (Pro): regex rules for file names, one per line ('pattern => replacement', or pattern only to remove)"},
     "rename_rules_ph": {"ja": "例: 【[^】]*】 => ", "en": "Example: \\[[^\\]]*\\] => "},
     "queue_empty_hint": {"ja": "キューは空です。\nURLを貼り付けて「キューに追加」を押すか、ここにドロップしてください", "en": "Queue is empty.\nPaste a URL and press Add to Queue, or drop files here"},
@@ -778,6 +781,67 @@ def renamed_path(path, rules_text):
     return get_unique_path(os.path.join(folder, new_base + ext))
 
 
+def parse_speed_bytes(text):
+    """yt-dlp の速度文字列（例: 1.23MiB/s）を bytes/sec に変換する。"""
+    match = re.match(r"\s*([\d.]+)\s*([KMGT]?i?B)/s", text or "")
+    if not match:
+        return None
+    value = float(match.group(1))
+    factors = {"B": 1, "KB": 1000, "MB": 1000 ** 2, "GB": 1000 ** 3,
+               "TB": 1000 ** 4, "KiB": 1024, "MiB": 1024 ** 2,
+               "GiB": 1024 ** 3, "TiB": 1024 ** 4}
+    return value * factors.get(match.group(2), 1)
+
+
+def render_template_preview(template):
+    """ファイル名テンプレートをサンプル値で描画する（プレビュー用）。"""
+    rendered = template or "{title}"
+    for key, sample in (("{title}", "サンプル曲名"),
+                        ("{uploader}", "サンプルアーティスト"),
+                        ("{id}", "dQw4w9WgXcQ"),
+                        ("{date}", "20261123")):
+        rendered = rendered.replace(key, sample)
+    return rendered
+
+
+class SpeedGraph(QWidget):
+    """直近のダウンロード速度を折れ線で描く小さなウィジェット。"""
+
+    MAX_SAMPLES = 60
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._samples = []
+        self.setFixedHeight(34)
+
+    def add_sample(self, bytes_per_sec):
+        self._samples.append(bytes_per_sec)
+        del self._samples[:-self.MAX_SAMPLES]
+        self.update()
+
+    def clear(self):
+        self._samples = []
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        width, height = self.width(), self.height()
+        if len(self._samples) >= 2:
+            peak = max(max(self._samples), 1024 * 1024)
+            step = width / (self.MAX_SAMPLES - 1)
+            points = []
+            offset = self.MAX_SAMPLES - len(self._samples)
+            for i, value in enumerate(self._samples):
+                x = (offset + i) * step
+                y = height - 3 - (value / peak) * (height - 8)
+                points.append(QPointF(x, y))
+            painter.setPen(QPen(QColor(ACCENT), 1.6))
+            for a, b in zip(points, points[1:]):
+                painter.drawLine(a, b)
+        painter.end()
+
+
 def find_new_entries(entries, seen_urls):
     """entries（新しい順）から未見のものを古い順に返す。"""
     seen = set(seen_urls)
@@ -1261,6 +1325,8 @@ class VibeDLFrame(QMainWindow):
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
         card2_layout.addWidget(self.progress)
+        self.speed_graph = SpeedGraph()
+        card2_layout.addWidget(self.speed_graph)
         self.status_label = QLabel("")
         self.status_label.setObjectName("muted")
         card2_layout.addWidget(self.status_label)
@@ -1334,6 +1400,9 @@ class VibeDLFrame(QMainWindow):
 
     def on_download_progress(self, percent, speed="", eta=""):
         self.progress.setValue(percent)
+        speed_value = parse_speed_bytes(speed)
+        if speed_value is not None:
+            self.speed_graph.add_sample(speed_value)
         parts = []
         if speed:
             parts.append(tr("speed", speed=speed))
@@ -2496,8 +2565,9 @@ class HistoryPanel(QWidget):
             entry = item.data(Qt.UserRole)
             if not isinstance(entry, dict):
                 continue
-            item.setHidden(
-                needle not in (entry.get('title', '') or '').lower())
+            haystack = ((entry.get('title', '') or '') + ' '
+                        + (entry.get('url', '') or '')).lower()
+            item.setHidden(needle not in haystack)
 
     def _selected_entry(self):
         item = self.list_widget.currentItem()
@@ -2742,6 +2812,13 @@ class SettingsPanel(QWidget):
         template_note = QLabel(tr("template_note"))
         template_note.setObjectName("muted")
         out_layout.addWidget(template_note)
+        self.template_preview = QLabel("")
+        self.template_preview.setObjectName("muted")
+        self.template_preview.setWordWrap(True)
+        out_layout.addWidget(self.template_preview)
+        self.name_template_ctrl.textChanged.connect(
+            self._update_template_preview)
+        self._update_template_preview()
         out_layout.addStretch()
         tabs.addTab(output_tab, tr("tab_output"))
 
@@ -3192,6 +3269,11 @@ class SettingsPanel(QWidget):
     def get_watch_urls(self):
         return [self.watch_list.item(i).text()
                 for i in range(self.watch_list.count())]
+
+    def _update_template_preview(self):
+        self.template_preview.setText(tr(
+            "template_preview_label",
+            name=render_template_preview(self.name_template_ctrl.text())))
 
     def get_config(self):
         self.config["output_format"] = self.fmt_combo.currentText()
